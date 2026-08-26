@@ -28,6 +28,7 @@ Core constraints:
 - allowlisted roots only
 - symlink-aware root enforcement
 - bounded reads, tails, and fan-out
+- bounded HTTP request bodies and server deadlines
 - read-only API surface
 - structured JSON-line audit log
 
@@ -48,6 +49,7 @@ After cloning, define the repository root once:
 git clone https://github.com/bindatype/SROIAAA.git
 cd SROIAAA
 SRO_ROOT="${SRO_ROOT:-$PWD}"
+export SROIAAA_AUTH_TOKEN="${SROIAAA_AUTH_TOKEN:-dev-sroiaaa-token}"
 ```
 
 ### Local
@@ -58,12 +60,22 @@ go test ./...
 go run ./cmd/sroiaaa-agent
 ```
 
-The server listens on `:8080` by default.
+The native server listens on `127.0.0.1:8080` by default and requires a
+bearer token on all API routes except `/healthz`. Remote exposure must be
+enabled explicitly and should be constrained by host firewall policy or a
+TLS-authenticated broker or reverse proxy.
 
 To override the host-run port explicitly:
 
 ```bash
-SROIAAA_BIND_ADDR=:18081 go run ./cmd/sroiaaa-agent
+SROIAAA_BIND_ADDR=127.0.0.1:18081 go run ./cmd/sroiaaa-agent
+```
+
+To listen on all IPv6 interfaces, including IPv4 where the host permits
+dual-stack sockets:
+
+```bash
+SROIAAA_BIND_ADDR='[::]:18081' go run ./cmd/sroiaaa-agent
 ```
 
 ### Cross-architecture builds
@@ -88,8 +100,9 @@ cd "$SRO_ROOT"
 docker compose up --build
 ```
 
-The Docker harness publishes the container on host port `18080` so it
-does not collide with a direct local `go run` on `:8080`.
+The Docker harness publishes the container on host loopback port `18080`
+so it does not collide with a direct local `go run` on port `8080` and is
+not remotely reachable by default.
 
 The compose harness:
 
@@ -132,13 +145,16 @@ curl -fsS http://127.0.0.1:18080/healthz | jq .
 Capabilities:
 
 ```bash
-curl -fsS http://127.0.0.1:18080/v1/capabilities | jq .
+curl -fsS \
+  -H "Authorization: Bearer $SROIAAA_AUTH_TOKEN" \
+  http://127.0.0.1:18080/v1/capabilities | jq .
 ```
 
 Host info:
 
 ```bash
 curl -fsS -X POST http://127.0.0.1:18080/v1/operations \
+  -H "Authorization: Bearer $SROIAAA_AUTH_TOKEN" \
   -H 'content-type: application/json' \
   -d '{
     "operation": "host.info"
@@ -149,6 +165,7 @@ List a directory:
 
 ```bash
 curl -fsS -X POST http://127.0.0.1:18080/v1/operations \
+  -H "Authorization: Bearer $SROIAAA_AUTH_TOKEN" \
   -H 'content-type: application/json' \
   -d '{
     "operation": "filesystem.list",
@@ -161,6 +178,7 @@ Tail a log:
 
 ```bash
 curl -fsS -X POST http://127.0.0.1:18080/v1/operations \
+  -H "Authorization: Bearer $SROIAAA_AUTH_TOKEN" \
   -H 'content-type: application/json' \
   -d '{
     "operation": "filesystem.tail",
@@ -173,14 +191,21 @@ curl -fsS -X POST http://127.0.0.1:18080/v1/operations \
 
 Configuration is environment-driven:
 
-- `SROIAAA_BIND_ADDR` default `:8080`
+- `SROIAAA_BIND_ADDR` default `127.0.0.1:8080`
+- `SROIAAA_AUTH_TOKEN` required single bearer token
+- `SROIAAA_AUTH_TOKENS` optional comma-separated additional valid tokens for rotation
 - `SROIAAA_ALLOWED_ROOTS` default `/workspace,/tmp,/var/log/sroiaaa`
 - `SROIAAA_PROC_ROOT` default `/proc`
+- `SROIAAA_MAX_REQUEST_BYTES` default `65536`
 - `SROIAAA_MAX_READ_BYTES` default `65536`
 - `SROIAAA_MAX_TAIL_BYTES` default `65536`
 - `SROIAAA_MAX_LIST_ENTRIES` default `256`
 - `SROIAAA_MAX_PROCESS_ENTRIES` default `256`
 - `SROIAAA_AUDIT_PATH` default `runtime/audit.log`
+- `SROIAAA_READ_HEADER_TIMEOUT` default `5s`
+- `SROIAAA_READ_TIMEOUT` default `15s`
+- `SROIAAA_WRITE_TIMEOUT` default `30s`
+- `SROIAAA_IDLE_TIMEOUT` default `60s`
 
 ## Empirical catalog workflow
 

@@ -19,13 +19,21 @@ func main() {
 	}
 
 	service := agent.NewService(cfg, auditor)
-	server := &http.Server{
-		Addr:    cfg.BindAddr,
-		Handler: agent.NewHandler(service, cfg),
-	}
+	server := newHTTPServer(cfg, agent.NewHandler(service, cfg))
 
 	log.Printf("sroiaaa-agent listening on %s", cfg.BindAddr)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("listen: %v", err)
+	}
+}
+
+func newHTTPServer(cfg agent.Config, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              cfg.BindAddr,
+		Handler:           handler,
+		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
+		ReadTimeout:       cfg.ReadTimeout,
+		WriteTimeout:      cfg.WriteTimeout,
+		IdleTimeout:       cfg.IdleTimeout,
 	}
 }

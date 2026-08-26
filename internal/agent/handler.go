@@ -2,9 +2,14 @@ package agent
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -21,9 +26,48 @@ func NewHandler(service *Service, cfg Config) http.Handler {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handler.handleHealth)
-	mux.HandleFunc("/v1/capabilities", handler.handleCapabilities)
-	mux.HandleFunc("/v1/operations", handler.handleOperations)
+	mux.Handle("/v1/capabilities", handler.requireBearerAuth(http.HandlerFunc(handler.handleCapabilities)))
+	mux.Handle("/v1/operations", handler.requireBearerAuth(http.HandlerFunc(handler.handleOperations)))
 	return mux
+}
+
+func (h *Handler) requireBearerAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token, ok := bearerToken(r.Header.Get("Authorization"))
+		if !ok || !h.validAuthToken(token) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="sroiaaa"`)
+			writeJSON(w, http.StatusUnauthorized, map[string]any{
+				"status": "error",
+				"error": map[string]string{
+					"code":    "unauthorized",
+					"message": "missing or invalid bearer token",
+				},
+			})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func bearerToken(header string) (string, bool) {
+	scheme, token, ok := strings.Cut(strings.TrimSpace(header), " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") {
+		return "", false
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return "", false
+	}
+	return token, true
+}
+
+func (h *Handler) validAuthToken(candidate string) bool {
+	for _, expected := range h.cfg.AuthTokens {
+		if subtle.ConstantTimeCompare([]byte(candidate), []byte(expected)) == 1 {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Handler) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -49,33 +93,17 @@ func (h *Handler) handleOperations(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req RequestEnvelope
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		resp := ResponseEnvelope{
-			RequestID: newRequestID(),
-			Operation: "",
-			Status:    "error",
-			Metadata: ResponseMeta{
-				Timestamp:  time.Now().UTC().Format(time.RFC3339Nano),
-				DurationMS: 0,
-				Truncated:  false,
-				Agent:      agentName,
-				Version:    agentVersion,
-			},
-			Error: &ErrorPayload{
-				Code:    "invalid_json",
-				Message: "request body must be valid JSON",
-			},
+	if err := h.decodeRequest(w, r, &req); err != nil {
+		statusCode := http.StatusBadRequest
+		code := "invalid_json"
+		message := "request body must contain exactly one valid JSON value"
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			statusCode = http.StatusRequestEntityTooLarge
+			code = "request_too_large"
+			message = fmt.Sprintf("request body exceeds %d bytes", h.cfg.MaxRequestBytes)
 		}
-		writeJSON(w, http.StatusBadRequest, resp)
-		_ = h.service.auditor.Record(AuditEvent{
-			RequestID:  resp.RequestID,
-			Operation:  req.Operation,
-			Status:     "error",
-			Code:       "invalid_json",
-			Message:    "request body must be valid JSON",
-			DurationMS: 0,
-			RemoteAddr: r.RemoteAddr,
-		})
+		h.writeRequestError(w, r, req.Operation, statusCode, code, message)
 		return
 	}
 
@@ -96,6 +124,61 @@ func (h *Handler) handleOperations(w http.ResponseWriter, r *http.Request) {
 		Message:    errorMessage(resp.Error),
 	})
 	writeJSON(w, statusCode, resp)
+}
+
+func (h *Handler) decodeRequest(w http.ResponseWriter, r *http.Request, req *RequestEnvelope) error {
+	body := http.MaxBytesReader(w, r.Body, h.cfg.MaxRequestBytes)
+	defer body.Close()
+
+	decoder := json.NewDecoder(body)
+	if err := decoder.Decode(req); err != nil {
+		return err
+	}
+
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("request body contains multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+func (h *Handler) writeRequestError(
+	w http.ResponseWriter,
+	r *http.Request,
+	operation string,
+	statusCode int,
+	code string,
+	message string,
+) {
+	resp := ResponseEnvelope{
+		RequestID: newRequestID(),
+		Operation: operation,
+		Status:    "error",
+		Metadata: ResponseMeta{
+			Timestamp:  time.Now().UTC().Format(time.RFC3339Nano),
+			DurationMS: 0,
+			Truncated:  false,
+			Agent:      agentName,
+			Version:    agentVersion,
+		},
+		Error: &ErrorPayload{
+			Code:    code,
+			Message: message,
+		},
+	}
+	writeJSON(w, statusCode, resp)
+	_ = h.service.auditor.Record(AuditEvent{
+		RequestID:  resp.RequestID,
+		Operation:  operation,
+		Status:     "error",
+		Code:       code,
+		Message:    message,
+		DurationMS: 0,
+		RemoteAddr: r.RemoteAddr,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, statusCode int, payload any) {

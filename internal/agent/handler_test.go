@@ -15,11 +15,54 @@ func TestCapabilitiesEndpoint(t *testing.T) {
 	handler, _ := newTestHandler(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestHealthEndpointDoesNotRequireAuth(t *testing.T) {
+	handler, _ := newTestHandler(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestCapabilitiesEndpointRejectsMissingAuth(t *testing.T) {
+	handler, _ := newTestHandler(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+	if got := rec.Header().Get("WWW-Authenticate"); got == "" {
+		t.Fatalf("expected WWW-Authenticate header")
+	}
+}
+
+func TestCapabilitiesEndpointAcceptsRotatedToken(t *testing.T) {
+	handler, _ := newTestHandlerWithConfig(t, func(cfg *Config) {
+		cfg.AuthTokens = []string{"primary-token", "rotated-token"}
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil)
+	req.Header.Set("Authorization", "Bearer rotated-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -84,11 +127,43 @@ func TestMalformedJSONRejected(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/operations", bytes.NewBufferString(`{"operation":`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestMultipleJSONValuesRejected(t *testing.T) {
+	handler, _ := newTestHandler(t)
+
+	rec := performJSONRequest(t, handler, `{"operation":"host.info"} {"operation":"host.info"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOversizedRequestRejected(t *testing.T) {
+	handler, root := newTestHandlerWithConfig(t, func(cfg *Config) {
+		cfg.MaxRequestBytes = 48
+	})
+
+	body := `{"operation":"host.info","params":{"padding":"` + strings.Repeat("x", 64) + `"}}`
+	rec := performJSONRequest(t, handler, body)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"request_too_large"`) {
+		t.Fatalf("expected request_too_large error, got %s", rec.Body.String())
+	}
+	audit, err := os.ReadFile(filepath.Join(root, "audit.log"))
+	if err != nil {
+		t.Fatalf("read audit log: %v", err)
+	}
+	if !strings.Contains(string(audit), `"code":"request_too_large"`) {
+		t.Fatalf("expected oversized request audit event, got %s", audit)
 	}
 }
 
@@ -106,6 +181,10 @@ func TestProcessListUsesConfiguredProcRoot(t *testing.T) {
 }
 
 func newTestHandler(t *testing.T) (http.Handler, string) {
+	return newTestHandlerWithConfig(t, nil)
+}
+
+func newTestHandlerWithConfig(t *testing.T, configure func(*Config)) (http.Handler, string) {
 	t.Helper()
 
 	root := t.TempDir()
@@ -133,13 +212,18 @@ func newTestHandler(t *testing.T) (http.Handler, string) {
 
 	cfg := Config{
 		BindAddr:          ":0",
+		AuthTokens:        []string{"test-token"},
 		AllowedRoots:      []string{workspace},
 		ProcRoot:          procRoot,
+		MaxRequestBytes:   1024,
 		MaxReadBytes:      16,
 		MaxTailBytes:      16,
 		MaxListEntries:    8,
 		MaxProcessEntries: 8,
 		AuditPath:         filepath.Join(root, "audit.log"),
+	}
+	if configure != nil {
+		configure(&cfg)
 	}
 	auditor, err := NewAuditor(cfg.AuditPath)
 	if err != nil {
@@ -153,6 +237,7 @@ func performJSONRequest(t *testing.T, handler http.Handler, body string) *httpte
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/v1/operations", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	return rec
