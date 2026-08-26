@@ -1,0 +1,7 @@
+runtime/
+bin/
+dist/
+.gocache/
+.gomodcache/
+*.log
+*.out

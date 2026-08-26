@@ -1,0 +1,26 @@
+services:
+  sroiaaa:
+    build:
+      context: .
+    ports:
+      - "18080:8080"
+    environment:
+      SROIAAA_BIND_ADDR: ":8080"
+      SROIAAA_ALLOWED_ROOTS: "/workspace,/tmp,/var/log/sroiaaa"
+      SROIAAA_PROC_ROOT: "/proc"
+      SROIAAA_MAX_READ_BYTES: "65536"
+      SROIAAA_MAX_TAIL_BYTES: "65536"
+      SROIAAA_MAX_LIST_ENTRIES: "256"
+      SROIAAA_MAX_PROCESS_ENTRIES: "256"
+      SROIAAA_AUDIT_PATH: "/runtime/audit.log"
+    volumes:
+      - ./testdata/workspace:/workspace:ro
+      - ./testdata/varlog:/var/log/sroiaaa:ro
+      - ./runtime:/runtime
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp

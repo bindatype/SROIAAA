@@ -1,0 +1,31 @@
+package main
+
+import (
+	"log"
+	"net/http"
+
+	"github.com/maclach/sroiaaa/internal/agent"
+)
+
+func main() {
+	cfg, err := agent.LoadConfigFromEnv()
+	if err != nil {
+		log.Fatalf("load config: %v", err)
+	}
+
+	auditor, err := agent.NewAuditor(cfg.AuditPath)
+	if err != nil {
+		log.Fatalf("create auditor: %v", err)
+	}
+
+	service := agent.NewService(cfg, auditor)
+	server := &http.Server{
+		Addr:    cfg.BindAddr,
+		Handler: agent.NewHandler(service, cfg),
+	}
+
+	log.Printf("sroiaaa-agent listening on %s", cfg.BindAddr)
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("listen: %v", err)
+	}
+}
