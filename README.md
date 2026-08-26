@@ -1,8 +1,9 @@
 # SROIAAA Phase One Prototype
 
-SROIAAA is a Phase One prototype for a safe, read-only Linux endpoint
-agent. The long-term target is a native Linux service managed by
-`systemd`; Docker is used here only as a controlled development harness.
+Secure Read-Only Infrastructure API for AI and Automation, or SROIAAA,
+is a Phase One prototype for a safe, read-only Linux endpoint agent.
+The long-term target is a native Linux service managed by `systemd`;
+Docker is used here only as a controlled development harness.
 
 This prototype intentionally does **not** expose arbitrary shell
 execution. It offers a small bounded operation API and records
