@@ -133,6 +133,22 @@ func (c *ZabbixConnector) Execute(ctx context.Context, step broker.RouteStep) (E
 	}
 
 	items := normalizeTriggers(result)
+
+	summary := summarizeTriggers(items, total)
+	if step.Host != "" && total == 0 {
+		// Zero rows for a named host is ambiguous: the host may be healthy, or
+		// it may not exist. Reporting "no problems" for a host Zabbix has never
+		// heard of reads as an assurance about a machine we know nothing about.
+		known, err := c.hostExists(ctx, step.Host)
+		if err != nil {
+			return Evidence{}, err
+		}
+		summary["host_known"] = 0
+		if known {
+			summary["host_known"] = 1
+		}
+	}
+
 	return Evidence{
 		Source:         string(broker.SourceZabbixAPI),
 		Action:         step.Action,
@@ -142,7 +158,7 @@ func (c *ZabbixConnector) Execute(ctx context.Context, step broker.RouteStep) (E
 		ItemCount:      len(items),
 		TotalAvailable: total,
 		Truncated:      total > len(items),
-		Summary:        summarizeTriggers(items, total),
+		Summary:        summary,
 		Items:          items,
 	}, nil
 }
@@ -185,6 +201,27 @@ func (c *ZabbixConnector) count(ctx context.Context, method string, params map[s
 		return 0, newConnectorError("decode_response", "unexpected count shape")
 	}
 	return asNumber, nil
+}
+
+// hostExists reports whether Zabbix monitors a host by this exact name.
+func (c *ZabbixConnector) hostExists(ctx context.Context, host string) (bool, error) {
+	payload, err := c.rawCall(ctx, "host.get", map[string]any{
+		"filter": map[string]any{"host": []string{host}},
+		"output": []string{"hostid"},
+		"limit":  1,
+	})
+	if err != nil {
+		return false, err
+	}
+	var envelope struct {
+		Result []struct {
+			HostID string `json:"hostid"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return false, newConnectorError("decode_response", err.Error())
+	}
+	return len(envelope.Result) > 0, nil
 }
 
 // zabbixTrigger mirrors only the fields we consume. Additional fields in a

@@ -19,11 +19,29 @@ You cannot access any system directly. To obtain evidence you must call the ` + 
 which routes through a trusted policy broker. You may only choose an intent and, where the intent
 allows, a host or resource alias. You cannot choose URLs, API methods, credentials, or file paths.
 
-Intents:
-  fleet.inventory      every Wazuh agent and its connection state. Takes no host.
-  agent.status         one specific Wazuh agent. Requires host.
-  monitoring.problems  active Zabbix problem triggers. Host is optional and narrows the result.
+Intents, and what each can and cannot answer:
+
+  fleet.inventory      Wazuh agent inventory and connection state. Takes no host.
+  agent.status         one Wazuh agent's connection state. Requires an exact agent name.
+  monitoring.problems  active Zabbix problem triggers. Host optional and narrows the result.
   live.evidence        a policy-approved file from a SROIAAA endpoint. Requires host and resource.
+
+These four intents are the ONLY evidence available to you. Nothing here reports
+vulnerabilities or CVEs, installed packages or patch level, log contents, user
+accounts, configuration, performance history, or hardware inventory. If a
+question needs something outside these four, say plainly that the data source
+is not available. Do NOT route the question to the nearest intent and answer
+from whatever comes back.
+
+Absence of evidence is not evidence of absence. An empty or zero result means
+no matching records were returned, which is not the same as the condition being
+absent. Never turn an empty result into a reassurance. This matters most for
+questions about safety or security: if you have no data source for something,
+saying "none were found" is a false assurance, and you must not say it.
+
+Host names must be exact. A name covering a range, such as "log001-004", is not
+a host. If evidence indicates a host was not found, say so, and do not report
+its absence of problems as though the host were healthy.
 
 When you receive evidence, answer from it only. Never invent hosts, counts, or timestamps.
 
@@ -41,8 +59,11 @@ func ToolDefinition() any {
 	return map[string]any{
 		"type": "function",
 		"function": map[string]any{
-			"name":        toolName,
-			"description": "Retrieve bounded, read-only infrastructure evidence through the SROIAAA policy broker.",
+			"name": toolName,
+			"description": "Retrieve bounded, read-only infrastructure evidence through the SROIAAA policy broker. " +
+				"Covers Wazuh agent inventory and connection state, and active Zabbix problem triggers. " +
+				"Does NOT cover vulnerabilities or CVEs, installed packages, patch level, log contents, " +
+				"user accounts, configuration, or performance history. Do not call this for questions it cannot answer.",
 			"parameters": map[string]any{
 				"type": "object",
 				"properties": map[string]any{

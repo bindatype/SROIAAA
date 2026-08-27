@@ -220,3 +220,48 @@ func TestZabbixSummaryCountsBySeverityAndRendersTimestamps(t *testing.T) {
 		t.Errorf("last_change = %q, want an RFC 3339 timestamp", got)
 	}
 }
+
+func TestZabbixDistinguishesUnknownHostFromHealthyHost(t *testing.T) {
+	// Zero problems for a host Zabbix has never heard of must not be reported
+	// the same way as zero problems for a monitored host.
+	for _, test := range []struct {
+		name      string
+		hostFound bool
+		want      int
+	}{
+		{"host is monitored and clean", true, 1},
+		{"host is not monitored at all", false, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				body := string(raw)
+				switch {
+				case strings.Contains(body, "host.get"):
+					if test.hostFound {
+						io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[{"hostid":"1"}]}`)
+					} else {
+						io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[]}`)
+					}
+				case strings.Contains(body, "countOutput"):
+					io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":"0"}`)
+				default:
+					io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[]}`)
+				}
+			}))
+			defer server.Close()
+
+			evidence, err := newTestZabbix(t, server.URL).Execute(context.Background(), broker.RouteStep{
+				Source: broker.SourceZabbixAPI,
+				Action: "trigger.get",
+				Host:   "log001-004",
+			})
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if got, ok := evidence.Summary["host_known"]; !ok || got != test.want {
+				t.Errorf("host_known = %v (present=%v), want %d", got, ok, test.want)
+			}
+		})
+	}
+}
