@@ -22,6 +22,10 @@ const (
 	wazuhEndpointEnv      = "SROIAAA_WAZUH_ENDPOINT"
 	wazuhUsernameEnv      = "WAZUH_API_USERNAME"
 	wazuhPasswordEnv      = "WAZUH_API_PASSWORD"
+
+	// defaultModel matched the larger models on routing and accuracy at a
+	// fraction of their latency in the 2026-08-27 model survey.
+	defaultModel = "qwen3.6:35b"
 )
 
 func main() {
@@ -32,7 +36,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("sroiaaa-chat", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	policyPath := flags.String("policy", "", "path to a broker policy JSON file")
-	model := flags.String("model", "", "model or alias to ask")
+	// Prefer a MindRouter alias here once one exists, so the client contract is
+	// the role rather than a specific model.
+	model := flags.String("model", defaultModel, "model or alias to ask")
 	endpoint := flags.String("mindrouter-endpoint", os.Getenv(mindrouterEndpointEnv), "MindRouter base URL")
 	zabbixEndpoint := flags.String("zabbix-endpoint", os.Getenv(zabbixEndpointEnv), "Zabbix JSON-RPC endpoint URL")
 	wazuhEndpoint := flags.String("wazuh-endpoint", os.Getenv(wazuhEndpointEnv), "Wazuh API base URL")
@@ -43,7 +49,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if *policyPath == "" || *model == "" {
-		fmt.Fprintln(stderr, "sroiaaa-chat: -policy and -model are required")
+		fmt.Fprintln(stderr, "sroiaaa-chat: -policy is required")
 		return 2
 	}
 

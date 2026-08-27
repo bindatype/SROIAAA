@@ -22,12 +22,14 @@ func TestZabbixConnectorNormalizesTriggers(t *testing.T) {
 			t.Errorf("Content-Type = %q", got)
 		}
 		body, _ := io.ReadAll(r.Body)
-		if err := json.Unmarshal(body, &captured); err != nil {
-			t.Fatalf("decode request: %v", err)
-		}
 		if strings.Contains(string(body), "countOutput") {
+			// The count call intentionally strips presentation parameters, so
+			// it must not overwrite what the data call sent.
 			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":"2"}`)
 			return
+		}
+		if err := json.Unmarshal(body, &captured); err != nil {
+			t.Fatalf("decode request: %v", err)
 		}
 		io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[
 			{"triggerid":"101","description":"Disk space low","priority":"4","value":"1","lastchange":"1756300000","hosts":[{"host":"node01"}]},
@@ -48,6 +50,12 @@ func TestZabbixConnectorNormalizesTriggers(t *testing.T) {
 
 	if captured["method"] != "trigger.get" {
 		t.Errorf("method = %v, want trigger.get", captured["method"])
+	}
+	// Without expandDescription, Zabbix returns unresolved macros such as
+	// {HOST.NAME}, which a model will repeat verbatim to a reader.
+	params, _ := captured["params"].(map[string]any)
+	if params["expandDescription"] != true {
+		t.Error("expandDescription must be requested so trigger macros resolve")
 	}
 	if evidence.ItemCount != 2 {
 		t.Fatalf("ItemCount = %d, want 2", evidence.ItemCount)

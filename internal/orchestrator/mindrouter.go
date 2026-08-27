@@ -22,7 +22,9 @@ import (
 )
 
 const (
-	defaultTimeout   = 120 * time.Second
+	// A cold load of a large model on an idle GPU can exceed two minutes, and
+	// scoring that as a failure hides a working model behind a client defect.
+	defaultTimeout   = 300 * time.Second
 	maxResponseBytes = 1 << 20
 )
 

@@ -101,14 +101,17 @@ func (c *ZabbixConnector) Execute(ctx context.Context, step broker.RouteStep) (E
 	}
 
 	params := map[string]any{
-		"output":        []string{"triggerid", "description", "priority", "value", "lastchange"},
-		"selectHosts":   []string{"host"},
-		"only_true":     true,
-		"monitored":     true,
-		"skipDependent": true,
-		"sortfield":     "priority",
-		"sortorder":     "DESC",
-		"limit":         limit,
+		"output":      []string{"triggerid", "description", "priority", "value", "lastchange"},
+		"selectHosts": []string{"host"},
+		// Without this, trigger descriptions come back with unresolved macros
+		// such as {HOST.NAME}, which a model will faithfully recite at a reader.
+		"expandDescription": true,
+		"only_true":         true,
+		"monitored":         true,
+		"skipDependent":     true,
+		"sortfield":         "priority",
+		"sortorder":         "DESC",
+		"limit":             limit,
 	}
 	if step.Host != "" {
 		params["host"] = step.Host
@@ -150,7 +153,7 @@ func (c *ZabbixConnector) count(ctx context.Context, method string, params map[s
 	countParams := make(map[string]any, len(params))
 	for key, value := range params {
 		switch key {
-		case "limit", "sortfield", "sortorder", "output", "selectHosts":
+		case "limit", "sortfield", "sortorder", "output", "selectHosts", "expandDescription":
 			continue
 		}
 		countParams[key] = value
