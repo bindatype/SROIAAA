@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -237,4 +238,81 @@ func TestLiveEvidenceIsWithheldUntilItsConnectorExists(t *testing.T) {
 			t.Fatal("live.evidence was offered with no sroiaaa-agent connector registered")
 		}
 	}
+}
+
+func TestRetryIsOfferedForMalformedCallsButNotRefusals(t *testing.T) {
+	// A model that puts a value in the wrong field made a mistake it can fix.
+	// A model told a host is not authorized received an answer, and retrying
+	// would turn a refusal into an invitation to look for a host that is.
+	tests := []struct {
+		name        string
+		err         error
+		wantRetried bool
+	}{
+		{"malformed request", &broker.RouteError{Code: "invalid_request"}, true},
+		{"invalid query", &broker.RouteError{Code: "invalid_query"}, true},
+		{"missing host", &broker.RouteError{Code: "missing_host"}, true},
+		{"unauthorized host", &broker.RouteError{Code: "host_not_authorized"}, false},
+		{"unauthorized resource", &broker.RouteError{Code: "resource_not_authorized"}, false},
+		{"unrelated error", errors.New("boom"), false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isRetryableRouteError(test.err); got != test.wantRetried {
+				t.Errorf("isRetryableRouteError(%v) = %v, want %v", test.err, got, test.wantRetried)
+			}
+		})
+	}
+}
+
+func TestSessionRetriesOnceAfterAFailedExecution(t *testing.T) {
+	var turns int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turns++
+		switch turns {
+		case 1:
+			// First attempt names a host the fake connector will reject.
+			io.WriteString(w, `{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[
+				{"id":"c1","type":"function","function":{"name":"sroiaaa_evidence","arguments":"{\"intent\":\"agent.status\",\"host\":\"broken\"}"}}]}}]}`)
+		case 2:
+			// Shown the error, it corrects itself.
+			io.WriteString(w, `{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[
+				{"id":"c2","type":"function","function":{"name":"sroiaaa_evidence","arguments":"{\"intent\":\"agent.status\",\"host\":\"node02\"}"}}]}}]}`)
+		default:
+			io.WriteString(w, `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"node02 is disconnected."}}]}`)
+		}
+	}))
+	defer server.Close()
+
+	fake := &failingOnceConnector{fakeConnector{source: broker.SourceWazuhAPI}}
+	session := newTestSession(t, server.URL, fake)
+
+	answer, err := session.Ask(context.Background(), "is that host healthy?")
+	if err != nil {
+		t.Fatalf("Ask() error = %v", err)
+	}
+	if answer != "node02 is disconnected." {
+		t.Errorf("answer = %q", answer)
+	}
+
+	var retried bool
+	for _, entry := range session.Trace() {
+		if entry.Stage == "retry_succeeded" {
+			retried = true
+		}
+	}
+	if !retried {
+		t.Error("trace should record that a retry succeeded")
+	}
+}
+
+// failingOnceConnector rejects the first host it is given and accepts the next,
+// standing in for a query that fails for a reason the model can correct.
+type failingOnceConnector struct{ fakeConnector }
+
+func (f *failingOnceConnector) Execute(ctx context.Context, step broker.RouteStep) (connector.Evidence, error) {
+	if step.Host == "broken" {
+		return connector.Evidence{}, errors.New("query_failed: syntax error near 'Partition'")
+	}
+	return f.fakeConnector.Execute(ctx, step)
 }

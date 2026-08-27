@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/maclach/sroiaaa/internal/broker"
@@ -25,10 +26,46 @@ Intents, and what each can and cannot answer:
   agent.status         one Wazuh agent's connection state. Requires an exact agent name.
   monitoring.problems  active Zabbix problem triggers. Host optional and narrows the result.
   live.evidence        a policy-approved file from a SROIAAA endpoint. Requires host and resource.
+  database.query       a read-only SQL query against the pegasusdb HPC accounting
+                       database. Requires query. Use this for jobs, scheduler
+                       outcomes, and storage usage.
 
-These four intents are the ONLY evidence available to you. Nothing here reports
-vulnerabilities or CVEs, installed packages or patch level, log contents, user
-accounts, configuration, performance history, or hardware inventory. If a
+These intents are the ONLY evidence available to you. Nothing here reports
+vulnerabilities or CVEs, installed packages or patch level, log contents,
+configuration, or hardware inventory.
+
+For database.query, write one SELECT statement against MariaDB.
+
+Live tables:
+  runTBL2      job records, current to within hours. SubmitTime, StartTime and
+               EndTime are unix integers. Other columns include netid,
+               groupName, JobID, NodeList, NNodes, ReqCPUS, State,
+               DerivedExitCode and Partition.
+  folderstats  daily per-folder storage snapshots: todaysdate, folderpath,
+               clustername, capacity_usage, data_usage, num_files.
+
+Column semantics that are easy to get wrong:
+
+- State is the authoritative job outcome. Use it for anything about success
+  or failure. Its values include COMPLETED, FAILED, TIMEOUT, NODE_FAIL and
+  CANCELLED, and cancellations often carry a suffix, so match those with
+  State LIKE 'CANCELLED%'.
+- DerivedExitCode is NOT a number. It is a Slurm 'exit:signal' string such as
+  '0:0', '0:15' or '1:0'. Comparing it to 0 silently coerces the string and
+  produces wrong counts: '0:15' compares equal to 0 even though that job did
+  not succeed. Do not use it to determine whether a job failed. Use State.
+- Partition is a reserved word in MariaDB. Quote it with backticks.
+
+Table freshness varies and the schema does not say so. The FY tables are
+closed fiscal-year rollups, FY2026 ending 2026-07-13, and nodemetrics stopped
+in 2022. Querying a stale table returns nothing, which is not the same as
+nothing having happened. Prefer runTBL2 for anything recent, always bound the
+query with a WHERE clause on time, and aggregate in SQL rather than listing
+rows when the question is about counts.
+
+When you answer from database.query, state the SQL you ran. The reader cannot
+check a number whose derivation is invisible, and a query that runs without
+error can still answer a different question than the one asked. If a
 question needs something outside these four, say plainly that the data source
 is not available. Do NOT route the question to the nearest intent and answer
 from whatever comes back.
@@ -170,16 +207,49 @@ func (s *Session) Ask(ctx context.Context, question string) (string, error) {
 	plan, err := s.router.Plan(request)
 	if err != nil {
 		s.record("policy_denied", err.Error(), false)
-		return "", fmt.Errorf("policy denied the proposed intent: %w", err)
+		// A malformed call and a refused one are different things. Putting SQL
+		// in the wrong field is a mistake the model can fix, and returning it
+		// to the reader helps nobody. Being told a host is not authorized is an
+		// answer, and offering a second attempt would turn a refusal into an
+		// invitation to look for a host that is.
+		if !isRetryableRouteError(err) {
+			return "", fmt.Errorf("policy denied the proposed intent: %w", err)
+		}
+		retried, retryErr := s.retryWithError(ctx, messages, choice, call, err)
+		if retryErr != nil {
+			return "", retryErr
+		}
+		if retried == nil {
+			return "", fmt.Errorf("policy denied the proposed intent: %w", err)
+		}
+		return s.synthesize(ctx, messages, choice, call, *retried)
 	}
 	planJSON, _ := json.Marshal(plan)
 	s.record("policy_allowed", string(planJSON), true)
 
 	result, err := s.executor.Execute(ctx, plan)
 	if err != nil {
-		return "", fmt.Errorf("execute plan: %w", err)
+		// A source that executes a statement the model composed can fail for
+		// reasons the model can fix -- a reserved word left unquoted, a column
+		// that does not exist. Returning the error to the model once is far
+		// more useful than returning it to the reader, who did not write the
+		// query and cannot correct it. Exactly one retry, so a model that
+		// cannot fix its own mistake fails rather than looping.
+		retried, retryErr := s.retryWithError(ctx, messages, choice, call, err)
+		if retryErr != nil {
+			return "", retryErr
+		}
+		if retried == nil {
+			return "", fmt.Errorf("execute plan: %w", err)
+		}
+		result = *retried
 	}
 
+	return s.synthesize(ctx, messages, choice, call, result)
+}
+
+// synthesize returns evidence to the model and collects the written answer.
+func (s *Session) synthesize(ctx context.Context, messages []Message, choice Choice, call ToolCall, result connector.Result) (string, error) {
 	evidenceJSON, err := json.Marshal(result)
 	if err != nil {
 		return "", fmt.Errorf("encode evidence: %w", err)
@@ -204,4 +274,66 @@ func (s *Session) Ask(ctx context.Context, question string) (string, error) {
 
 func (s *Session) record(stage, detail string, allowed bool) {
 	s.trace = append(s.trace, TraceEntry{Stage: stage, Detail: detail, Allowed: allowed})
+}
+
+// retryWithError gives the model one chance to correct a failed execution.
+// It returns nil, nil when no retry is warranted or the second attempt was no
+// better, leaving the caller to report the original failure.
+func (s *Session) retryWithError(ctx context.Context, messages []Message, choice Choice, call ToolCall, cause error) (*connector.Result, error) {
+	s.record("execution_failed", cause.Error(), false)
+
+	followUp := append(append([]Message(nil), messages...),
+		Message{Role: "assistant", Content: choice.Message.Content, ToolCalls: choice.Message.ToolCalls},
+		Message{Role: "tool", ToolCallID: call.ID, Name: toolName,
+			Content: fmt.Sprintf(`{"error":%q,"guidance":"The request failed. Correct it and call the tool once more. Do not apologize or explain; just issue the corrected call."}`, cause.Error())},
+	)
+
+	retry, err := s.client.Complete(ctx, followUp, []any{ToolDefinition(s.intents)})
+	if err != nil {
+		return nil, err
+	}
+	if len(retry.Message.ToolCalls) == 0 {
+		return nil, nil
+	}
+	retryCall := retry.Message.ToolCalls[0]
+	if retryCall.Function.Name != toolName {
+		return nil, nil
+	}
+	s.record("retry_proposed", retryCall.Function.Arguments, true)
+
+	request, err := broker.DecodeRouteRequest(newLimitedReader(retryCall.Function.Arguments))
+	if err != nil {
+		s.record("retry_rejected", err.Error(), false)
+		return nil, nil
+	}
+	plan, err := s.router.Plan(request)
+	if err != nil {
+		s.record("retry_denied", err.Error(), false)
+		return nil, nil
+	}
+
+	result, err := s.executor.Execute(ctx, plan)
+	if err != nil {
+		s.record("retry_failed", err.Error(), false)
+		return nil, nil
+	}
+	s.record("retry_succeeded", "", true)
+	return &result, nil
+}
+
+// isRetryableRouteError reports whether a denial describes a malformed request
+// rather than a refused one. Authorization outcomes are never retried.
+func isRetryableRouteError(err error) bool {
+	var routeErr *broker.RouteError
+	if !errors.As(err, &routeErr) {
+		return false
+	}
+	switch routeErr.Code {
+	case "invalid_request", "invalid_query", "invalid_host", "invalid_resource",
+		"missing_host", "missing_resource", "unknown_intent":
+		return true
+	default:
+		// host_not_authorized and resource_not_authorized land here.
+		return false
+	}
 }

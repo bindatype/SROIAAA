@@ -14,9 +14,14 @@ import "time"
 // a claim came from, and so that an audit record can be written without
 // re-deriving the request.
 type Evidence struct {
-	Source      string    `json:"source"`
-	Action      string    `json:"action"`
-	Endpoint    string    `json:"endpoint"`
+	Source   string `json:"source"`
+	Action   string `json:"action"`
+	Endpoint string `json:"endpoint"`
+	// Query records what actually ran, when a source executes a statement the
+	// model composed. Without it an answer is unauditable by the person
+	// reading it: the number looks authoritative and its derivation is
+	// invisible.
+	Query       string    `json:"query,omitempty"`
 	RequestedAt time.Time `json:"requested_at"`
 	DurationMS  int64     `json:"duration_ms"`
 	ItemCount   int       `json:"item_count"`

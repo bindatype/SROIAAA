@@ -19,6 +19,7 @@ const (
 	wazuhEndpointEnv  = "SROIAAA_WAZUH_ENDPOINT"
 	wazuhUsernameEnv  = "WAZUH_API_USERNAME"
 	wazuhPasswordEnv  = "WAZUH_API_PASSWORD"
+	pegasusDSNEnv     = "SROIAAA_PEGASUS_DSN"
 )
 
 func main() {
@@ -193,8 +194,22 @@ func buildConnectors(plan broker.RoutePlan, options connectorOptions) ([]connect
 		built = append(built, wazuh)
 	}
 
+	if needed[broker.SourcePegasusDB] {
+		dsn := os.Getenv(pegasusDSNEnv)
+		if dsn == "" {
+			return nil, fmt.Errorf("plan needs the accounting database: %s must be set and exported", pegasusDSNEnv)
+		}
+		pegasus, err := connector.NewPegasusConnector(connector.PegasusConfig{DSN: dsn})
+		if err != nil {
+			return nil, err
+		}
+		built = append(built, pegasus)
+	}
+
 	for source := range needed {
-		if source != broker.SourceZabbixAPI && source != broker.SourceWazuhAPI {
+		switch source {
+		case broker.SourceZabbixAPI, broker.SourceWazuhAPI, broker.SourcePegasusDB:
+		default:
 			return nil, fmt.Errorf("no connector implemented for source %q", source)
 		}
 	}

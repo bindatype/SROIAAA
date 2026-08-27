@@ -7,6 +7,7 @@ const (
 	IntentAgentStatus        Intent = "agent.status"
 	IntentMonitoringProblems Intent = "monitoring.problems"
 	IntentLiveEvidence       Intent = "live.evidence"
+	IntentDatabaseQuery      Intent = "database.query"
 )
 
 type Source string
@@ -15,6 +16,7 @@ const (
 	SourceWazuhAPI  Source = "wazuh-api"
 	SourceZabbixAPI Source = "zabbix-api"
 	SourceSROIAAA   Source = "sroiaaa-agent"
+	SourcePegasusDB Source = "pegasus-db"
 )
 
 // SourceForIntent reports which data source an intent routes to. It lets a
@@ -28,6 +30,8 @@ func SourceForIntent(intent Intent) (Source, bool) {
 		return SourceZabbixAPI, true
 	case IntentLiveEvidence:
 		return SourceSROIAAA, true
+	case IntentDatabaseQuery:
+		return SourcePegasusDB, true
 	default:
 		return "", false
 	}
@@ -40,6 +44,7 @@ func AllIntents() []Intent {
 		IntentAgentStatus,
 		IntentMonitoringProblems,
 		IntentLiveEvidence,
+		IntentDatabaseQuery,
 	}
 }
 
@@ -47,6 +52,11 @@ type RouteRequest struct {
 	Intent   Intent `json:"intent"`
 	Host     string `json:"host,omitempty"`
 	Resource string `json:"resource,omitempty"`
+	// Query is the one field a model may author rather than choose from a
+	// fixed set. It applies to database.query only, where the credential's
+	// single-schema read grant bounds the damage class in a way that no
+	// filesystem path could.
+	Query string `json:"query,omitempty"`
 }
 
 type RoutePlan struct {
@@ -61,6 +71,7 @@ type RouteStep struct {
 	Host      string           `json:"host,omitempty"`
 	Limit     int              `json:"limit,omitempty"`
 	Operation string           `json:"operation,omitempty"`
+	Query     string           `json:"query,omitempty"`
 	Target    *OperationTarget `json:"target,omitempty"`
 	Params    *OperationParams `json:"params,omitempty"`
 }

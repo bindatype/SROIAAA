@@ -3,6 +3,7 @@ package broker
 import (
 	"fmt"
 	"reflect"
+	"strings"
 )
 
 const (
@@ -74,6 +75,20 @@ func (r *Router) Plan(request RouteRequest) (RoutePlan, error) {
 			Action: "trigger.get",
 			Host:   request.Host,
 			Limit:  monitoringIssueLimit,
+		}), nil
+
+	case IntentDatabaseQuery:
+		if request.Host != "" || request.Resource != "" {
+			return RoutePlan{}, newRouteError("invalid_request", "database.query does not accept host or resource")
+		}
+		if err := ValidateQuery(request.Query); err != nil {
+			return RoutePlan{}, newRouteError("invalid_query", err.Error())
+		}
+		return newPlan(request.Intent, RouteStep{
+			Source: SourcePegasusDB,
+			Action: "query.execute",
+			Query:  strings.TrimSpace(request.Query),
+			Limit:  maxQueryRows,
 		}), nil
 
 	case IntentLiveEvidence:
@@ -193,6 +208,12 @@ func (r *Router) candidateRequests(plan RoutePlan) []RouteRequest {
 
 	case IntentAgentStatus, IntentMonitoringProblems:
 		return []RouteRequest{{Intent: plan.Intent, Host: host}}
+
+	case IntentDatabaseQuery:
+		// The query is carried verbatim in the plan rather than resolved from
+		// policy, so reconstruction uses it directly. Validation runs again
+		// during the replan, so a query edited after planning is still caught.
+		return []RouteRequest{{Intent: plan.Intent, Query: plan.Steps[0].Query}}
 
 	case IntentLiveEvidence:
 		// The resource alias is consumed during planning and does not appear in

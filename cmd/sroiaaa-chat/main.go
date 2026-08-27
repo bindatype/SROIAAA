@@ -22,6 +22,7 @@ const (
 	wazuhEndpointEnv      = "SROIAAA_WAZUH_ENDPOINT"
 	wazuhUsernameEnv      = "WAZUH_API_USERNAME"
 	wazuhPasswordEnv      = "WAZUH_API_PASSWORD"
+	pegasusDSNEnv         = "SROIAAA_PEGASUS_DSN"
 
 	// defaultModel matched the larger models on routing and accuracy at a
 	// fraction of their latency in the 2026-08-27 model survey.
@@ -151,6 +152,13 @@ func buildSession(policyPath, model, endpoint, zabbixEndpoint, wazuhEndpoint str
 			return nil, err
 		}
 		connectors = append(connectors, wazuh)
+	}
+	if dsn := os.Getenv(pegasusDSNEnv); dsn != "" {
+		pegasus, err := connector.NewPegasusConnector(connector.PegasusConfig{DSN: dsn})
+		if err != nil {
+			return nil, err
+		}
+		connectors = append(connectors, pegasus)
 	}
 	if len(connectors) == 0 {
 		return nil, fmt.Errorf("no connectors configured; set Zabbix and/or Wazuh endpoints and credentials")
