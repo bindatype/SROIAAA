@@ -41,11 +41,17 @@ Core constraints:
 ## Layout
 
 ```text
-cmd/sroiaaa-agent/         main program
-cmd/sroiaaa-broker-plan/   broker-v0 route planning CLI
+cmd/sroiaaa-agent/         endpoint agent
+cmd/sroiaaa-broker-plan/   turns an intent into a route plan
+cmd/sroiaaa-broker-exec/   executes a route plan against live sources
+cmd/sroiaaa-chat/          asks a question in natural language
 internal/agent/            API, execution, validation, audit logic
 internal/broker/           deterministic policy and routing kernel
+internal/connector/        Zabbix and Wazuh connectors, plan executor
+internal/orchestrator/     the model loop: intent in, evidence out
 configs/                   example broker policy
+docs/                      adding-a-connector.md
+scripts/                   harness fitness survey, evidence-loop evaluations
 testdata/workspace/        sample files mounted into the container
 testdata/varlog/           sample log files mounted into the container
 ```
@@ -238,9 +244,17 @@ withholds it and returns `503 audit_unavailable`.
 
 ## Broker routing experiment
 
-Broker v0 begins as a planning-only executable. It does not listen on a
-network port, hold credentials, or call live data sources yet. Its job is
-to turn a small structured intent into a deterministic route plan.
+Broker v0 plans; `sroiaaa-broker-exec` executes. Neither listens on a
+network port. The planner turns a small structured intent into a
+deterministic route plan; the executor dispatches each step to a
+connector.
+
+Policy is enforced when a plan is **produced**, not when it is executed.
+`sroiaaa-broker-exec` validates a plan structurally but does not re-check
+it against policy, so a hand-written plan bypasses the router. The fixed
+action tables in each connector still bound what is reachable. Closing
+this gap is a prerequisite for adding a SROIAAA endpoint connector, since
+a hand-written plan could otherwise carry an arbitrary filesystem path.
 
 | Intent | Route |
 |---|---|
@@ -273,6 +287,104 @@ printf '%s\n' \
 Requests containing unrecognized fields are rejected. In particular,
 adding a model-selected `path`, `operation`, or endpoint to the request
 does not expand broker authority.
+
+## The evidence loop
+
+A question in natural language, answered from live evidence:
+
+```bash
+source ~/.config/sroiaaa/env
+go run ./cmd/sroiaaa-chat \
+  -policy ./configs/broker-policy.example.json \
+  -wazuh-insecure \
+  "what problems are active on dss01?"
+```
+
+Add `-trace` to print the decision chain to stderr: what the model
+proposed, whether policy allowed it, and what executed. A denied request
+shows where it stopped and executes nothing.
+
+The same path without a model, one step per pipe:
+
+```bash
+echo '{"intent":"monitoring.problems","host":"dss01"}' \
+  | go run ./cmd/sroiaaa-broker-plan -policy ./configs/broker-policy.example.json \
+  | go run ./cmd/sroiaaa-broker-exec
+```
+
+### What it can and cannot answer
+
+Four intents, and nothing else:
+
+| Ask about | Intent | Source |
+|---|---|---|
+| agent inventory and connection state | `fleet.inventory` | Wazuh API |
+| one agent's state, by exact name | `agent.status` | Wazuh API |
+| active problem triggers, optionally per host | `monitoring.problems` | Zabbix API |
+| a policy-approved file from an endpoint | `live.evidence` | SROIAAA agent |
+
+There is **no** source for vulnerabilities or CVEs, installed packages,
+patch level, log contents, user accounts, configuration, or performance
+history. Asking anyway should produce a refusal rather than an answer
+drawn from the nearest available source; there are prompt rules and tests
+enforcing that, because an early version answered a CVE question from
+Zabbix trigger data and reported "no critical CVEs" for a host that did
+not exist.
+
+Wazuh vulnerability data lives in the Indexer, not the API. `/vulnerability`
+returns 404 on 4.14.5. Reaching it needs an SSH tunnel and a separate
+credential; see the Wazuh Interaction Guide.
+
+### Runtime environment
+
+Credentials live in a file that is sourced explicitly, never in the
+repository:
+
+```bash
+mkdir -p ~/.config/sroiaaa && chmod 700 ~/.config/sroiaaa
+umask 077
+cat > ~/.config/sroiaaa/env <<'ENVEOF'
+export MINDROUTER_API_KEY=...
+export SROIAAA_MINDROUTER_ENDPOINT=http://localhost:8000
+export SROIAAA_ZABBIX_ENDPOINT=https://zabbix.example.edu/api_jsonrpc.php
+export ZABBIX_RO_TOKEN=...
+export SROIAAA_WAZUH_ENDPOINT=https://wazuh.example.edu:55000
+export WAZUH_API_USERNAME=...
+export WAZUH_API_PASSWORD=...
+ENVEOF
+chmod 600 ~/.config/sroiaaa/env
+```
+
+Note `export`. A variable merely set in `~/.bashrc` is visible to an
+interactive shell but not inherited by child processes, which has cost
+time on three separate occasions.
+
+`-wazuh-insecure` is required where the Wazuh manager presents a
+self-signed certificate. It warns rather than defaulting to trust.
+
+## Evaluations
+
+```bash
+source ~/.config/sroiaaa/env
+make eval-zabbix    # one model against the monitoring plane
+make eval-models    # several models, scored on routing and accuracy
+```
+
+Both fetch ground truth live and write a report to `runtime/`. Counts that
+move during a run are bounded by sampling before and after each call.
+
+Two rules learned the hard way. Any figure a reader might act on is
+computed in Go and placed in `Evidence.Summary`; a model asked to tally
+275 records answered 55 against a true 52, and asked for a total reported
+the page limit of 25 against a true 1841. And be suspicious of the grader
+before the model: during the first survey it failed correct answers over a
+thousands separator and a regex that would not match a single digit.
+
+## Adding a data source
+
+See [docs/adding-a-connector.md](docs/adding-a-connector.md) for the
+connector contract, the five places a new source touches, and the
+invariants every connector must uphold.
 
 ## Empirical catalog workflow
 
