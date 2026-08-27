@@ -78,6 +78,29 @@ def numbers_in(text):
     return [int(n) for n in re.findall(r"\b(\d{1,7})\b", text)]
 
 
+def states_a_number(text, expected, tolerance=0.01):
+    """Whether the answer states a value close to expected.
+
+    Substring matching fails answers that are right: a model reporting 11.09
+    against a ground truth rounded to 11.1 is not wrong, and neither is one
+    writing 1,846 for 1846. Compare numerically, with a small tolerance for
+    rounding.
+    """
+    try:
+        want = float(str(expected).replace(",", ""))
+    except ValueError:
+        return str(expected).lower() in normalize(text)
+    for found in re.findall(r"\d+(?:\.\d+)?", normalize(text)):
+        value = float(found)
+        if want == 0:
+            if value == 0:
+                return True
+            continue
+        if abs(value - want) / abs(want) <= tolerance:
+            return True
+    return False
+
+
 def ask(binary, model, question, policy=DEFAULT_POLICY, timeout=420):
     """Run one question and return (answer, proposed_intent, host, seconds)."""
     import time
@@ -97,7 +120,8 @@ def ask(binary, model, question, policy=DEFAULT_POLICY, timeout=420):
     if match:
         try:
             args = json.loads(match.group(1))
-            intent, host = args.get("intent", ""), args.get("host", "")
+            intent = re.sub(r"[^a-z.]", "", args.get("intent", "").lower())
+            host = args.get("host", "")
         except json.JSONDecodeError:
             pass
     return answer, intent, host, elapsed

@@ -25,6 +25,7 @@ const (
 	wazuhPasswordEnv      = "WAZUH_API_PASSWORD"
 	pegasusDSNEnv         = "SROIAAA_PEGASUS_DSN"
 	pegasusMaxRowsEnv     = "SROIAAA_PEGASUS_MAX_ROWS"
+	auditPathEnv          = "SROIAAA_BROKER_AUDIT"
 
 	// defaultModel matched the larger models on routing and accuracy at a
 	// fraction of their latency in the 2026-08-27 model survey.
@@ -47,6 +48,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	wazuhEndpoint := flags.String("wazuh-endpoint", os.Getenv(wazuhEndpointEnv), "Wazuh API base URL")
 	wazuhInsecure := flags.Bool("wazuh-insecure", false, "skip TLS verification for the Wazuh API")
 	showTrace := flags.Bool("trace", false, "print the policy decision trace to stderr")
+	auditPath := flags.String("audit", os.Getenv(auditPathEnv), "append a JSON-lines audit record for each question")
 	timeout := flags.Duration("timeout", 180*time.Second, "overall timeout")
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -74,6 +76,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "sroiaaa-chat: %v\n", err)
 		return 2
+	}
+
+	if *auditPath != "" {
+		auditor, err := orchestrator.NewAuditor(*auditPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "sroiaaa-chat: open audit: %v\n", err)
+			return 2
+		}
+		defer auditor.Close()
+		session = session.WithAudit(auditor, *model)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)

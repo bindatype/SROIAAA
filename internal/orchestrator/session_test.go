@@ -1,12 +1,15 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -315,4 +318,59 @@ func (f *failingOnceConnector) Execute(ctx context.Context, step broker.RouteSte
 		return connector.Evidence{}, errors.New("query_failed: syntax error near 'Partition'")
 	}
 	return f.fakeConnector.Execute(ctx, step)
+}
+
+func TestAuditRecordsTheTranslationAndTheDenial(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[
+			{"id":"c1","type":"function","function":{"name":"sroiaaa_evidence","arguments":"{\"intent\":\"live.evidence\",\"host\":\"not-authorized\",\"resource\":\"system-log\"}"}}]}}]}`)
+	}))
+	defer server.Close()
+
+	auditor, err := NewAuditor(path)
+	if err != nil {
+		t.Fatalf("NewAuditor() error = %v", err)
+	}
+	defer auditor.Close()
+
+	session := newTestSession(t, server.URL, &fakeConnector{source: broker.SourceSROIAAA}).
+		WithAudit(auditor, "test-model")
+
+	if _, err := session.Ask(context.Background(), "read the log on not-authorized"); err == nil {
+		t.Fatal("expected the unauthorized host to be denied")
+	}
+
+	// A denial must be recorded. A log that kept only successful requests would
+	// omit exactly the events worth reviewing.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read audit: %v", err)
+	}
+	var event AuditEvent
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &event); err != nil {
+		t.Fatalf("decode audit line: %v", err)
+	}
+	if event.Decision != "denied" {
+		t.Errorf("decision = %q, want denied", event.Decision)
+	}
+	if !strings.Contains(event.Proposed, "not-authorized") {
+		t.Errorf("proposed = %q, want the model's verbatim arguments", event.Proposed)
+	}
+	if event.Question != "read the log on not-authorized" {
+		t.Errorf("question = %q", event.Question)
+	}
+	if event.Model != "test-model" || event.RequestID == "" || event.Timestamp == "" {
+		t.Errorf("event is missing correlation fields: %+v", event)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat audit: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("audit file mode = %o, want 600", mode)
+	}
 }

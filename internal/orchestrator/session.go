@@ -2,9 +2,14 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
+	"time"
 
 	"github.com/maclach/sroiaaa/internal/broker"
 	"github.com/maclach/sroiaaa/internal/connector"
@@ -195,7 +200,19 @@ type Session struct {
 	router   *broker.Router
 	executor *connector.Executor
 	intents  []string
+	auditor  *Auditor
+	model    string
 	trace    []TraceEntry
+	event    AuditEvent
+	started  time.Time
+}
+
+// WithAudit attaches an audit destination. Without one the session still works
+// but leaves no record, which is the state this replaced.
+func (s *Session) WithAudit(auditor *Auditor, model string) *Session {
+	s.auditor = auditor
+	s.model = model
+	return s
 }
 
 // TraceEntry records one step of the loop so an operator can see exactly what
@@ -238,6 +255,16 @@ func (s *Session) Trace() []TraceEntry {
 // execute the resulting plan, and synthesize an answer from the evidence.
 func (s *Session) Ask(ctx context.Context, question string) (string, error) {
 	s.trace = nil
+	s.started = time.Now()
+	s.event = AuditEvent{
+		RequestID: newRequestID(),
+		Question:  question,
+		Model:     s.model,
+		Decision:  "no_tool_call",
+		Status:    "answered",
+	}
+	defer s.writeAudit()
+
 	messages := []Message{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: question},
@@ -258,6 +285,7 @@ func (s *Session) Ask(ctx context.Context, question string) (string, error) {
 		return "", fmt.Errorf("model requested unknown tool %q", call.Function.Name)
 	}
 	s.record("intent_proposed", call.Function.Arguments, true)
+	s.event.Proposed = call.Function.Arguments
 
 	// The model's arguments are untrusted input. They are decoded with the same
 	// strictness the broker applies to any route request, then authorized by
@@ -271,6 +299,7 @@ func (s *Session) Ask(ctx context.Context, question string) (string, error) {
 	plan, err := s.router.Plan(request)
 	if err != nil {
 		s.record("policy_denied", err.Error(), false)
+		s.event.Decision = "denied"
 		// A malformed call and a refused one are different things. Putting SQL
 		// in the wrong field is a mistake the model can fix, and returning it
 		// to the reader helps nobody. Being told a host is not authorized is an
@@ -290,6 +319,8 @@ func (s *Session) Ask(ctx context.Context, question string) (string, error) {
 	}
 	planJSON, _ := json.Marshal(plan)
 	s.record("policy_allowed", string(planJSON), true)
+	s.event.Decision = "allowed"
+	s.event.Plan = planJSON
 
 	result, err := s.executor.Execute(ctx, plan)
 	if err != nil {
@@ -322,6 +353,18 @@ func (s *Session) synthesize(ctx context.Context, messages []Message, choice Cho
 		return "", fmt.Errorf("evidence exceeded %d bytes; narrow the request", maxEvidenceJSON)
 	}
 	s.record("evidence_collected", fmt.Sprintf("%d source(s)", len(result.Evidence)), true)
+	for _, evidence := range result.Evidence {
+		s.event.Calls = append(s.event.Calls, AuditCall{
+			Source:     evidence.Source,
+			Action:     evidence.Action,
+			Endpoint:   evidence.Endpoint,
+			Query:      evidence.Query,
+			DurationMS: evidence.DurationMS,
+			ItemCount:  evidence.ItemCount,
+			Truncated:  evidence.Truncated,
+			Summary:    evidence.Summary,
+		})
+	}
 
 	messages = append(messages,
 		Message{Role: "assistant", Content: choice.Message.Content, ToolCalls: choice.Message.ToolCalls},
@@ -332,8 +375,16 @@ func (s *Session) synthesize(ctx context.Context, messages []Message, choice Cho
 	if err != nil {
 		return "", err
 	}
+	answer := strings.TrimSpace(final.Message.Content)
+	if answer == "" {
+		// An empty answer is the worst failure available: the caller cannot tell
+		// it apart from success, and evidence was collected to produce nothing.
+		s.record("empty_answer", "model returned no content", false)
+		return "", fmt.Errorf("model returned an empty answer after collecting evidence")
+	}
 	s.record("answer_synthesized", "", true)
-	return final.Message.Content, nil
+	s.event.AnswerChars = len(answer)
+	return answer, nil
 }
 
 func (s *Session) record(stage, detail string, allowed bool) {
@@ -400,4 +451,36 @@ func isRetryableRouteError(err error) bool {
 		// host_not_authorized and resource_not_authorized land here.
 		return false
 	}
+}
+
+// writeAudit records the event, filling in the outcome from the trace. It runs
+// on every path out of Ask, so a denial or a failure is recorded as faithfully
+// as an answer.
+func (s *Session) writeAudit() {
+	if s.auditor == nil {
+		return
+	}
+	s.event.DurationMS = time.Since(s.started).Milliseconds()
+	if s.event.AnswerChars == 0 && s.event.Status == "answered" {
+		s.event.Status = "failed"
+		for _, entry := range s.trace {
+			if !entry.Allowed {
+				s.event.Error = entry.Stage + ": " + entry.Detail
+			}
+		}
+	}
+	if err := s.auditor.Record(s.event); err != nil {
+		// Deliberately visible. An audit that fails quietly is worse than none,
+		// because it invites the belief that a record exists.
+		fmt.Fprintf(os.Stderr, "sroiaaa: AUDIT WRITE FAILED: %v\n", err)
+	}
+}
+
+// newRequestID returns a short correlation identifier.
+func newRequestID() string {
+	buffer := make([]byte, 8)
+	if _, err := rand.Read(buffer); err != nil {
+		return fmt.Sprintf("t%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(buffer)
 }

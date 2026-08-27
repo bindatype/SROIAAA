@@ -1,0 +1,110 @@
+package orchestrator
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+)
+
+// AuditEvent records one question, from what the model proposed through what
+// executed to what came back.
+//
+// The translation from a sentence into a query is the part of this system that
+// most needs a durable record. It is where a model's judgment enters, it is the
+// step no reader of the answer can see, and it is the only thing that explains
+// after the fact why a particular number was produced. Until now it existed
+// only as -trace output on stderr, which is to say it did not exist.
+type AuditEvent struct {
+	Timestamp string `json:"timestamp"`
+	RequestID string `json:"request_id"`
+	Question  string `json:"question"`
+	Model     string `json:"model"`
+
+	// Proposed is the model's tool arguments, verbatim and before validation.
+	// The denied cases are the interesting ones, and a record that only kept
+	// successful requests would omit exactly the events worth reviewing.
+	Proposed string          `json:"proposed,omitempty"`
+	Decision string          `json:"decision"`
+	Plan     json.RawMessage `json:"plan,omitempty"`
+
+	Calls []AuditCall `json:"calls,omitempty"`
+
+	// AnswerChars rather than the answer. The question is short and worth
+	// searching on; an answer is long and reconstructible from the plan and the
+	// evidence summary.
+	AnswerChars int    `json:"answer_chars,omitempty"`
+	Status      string `json:"status"`
+	Error       string `json:"error,omitempty"`
+	DurationMS  int64  `json:"duration_ms"`
+}
+
+// AuditCall records one connector execution. The summary is kept and the items
+// are not: a fleet inventory is several hundred records, and duplicating those
+// into an audit file on every question buys little that the summary does not
+// already say.
+type AuditCall struct {
+	Source     string         `json:"source"`
+	Action     string         `json:"action"`
+	Endpoint   string         `json:"endpoint"`
+	Query      string         `json:"query,omitempty"`
+	DurationMS int64          `json:"duration_ms"`
+	ItemCount  int            `json:"item_count"`
+	Truncated  bool           `json:"truncated"`
+	Summary    map[string]int `json:"summary,omitempty"`
+}
+
+// Auditor appends events to a JSON-lines file.
+type Auditor struct {
+	mu   sync.Mutex
+	file *os.File
+}
+
+// NewAuditor opens the audit file, creating it with owner-only permissions and
+// correcting the mode if it already exists with weaker ones.
+func NewAuditor(path string) (*Auditor, error) {
+	if directory := filepath.Dir(path); directory != "" {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			return nil, err
+		}
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return &Auditor{file: file}, nil
+}
+
+// Close releases the audit file.
+func (a *Auditor) Close() error { return a.file.Close() }
+
+// Record appends one event. A short write is treated as a failure, matching the
+// endpoint agent: a partially written line is not a record.
+func (a *Auditor) Record(event AuditEvent) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if event.Timestamp == "" {
+		event.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	encoded = append(encoded, '\n')
+
+	written, err := a.file.Write(encoded)
+	if err != nil {
+		return err
+	}
+	if written != len(encoded) {
+		return fmt.Errorf("short audit write: %d of %d bytes", written, len(encoded))
+	}
+	return nil
+}
