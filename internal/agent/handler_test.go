@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -167,7 +168,7 @@ func TestOversizedRequestRejected(t *testing.T) {
 	}
 }
 
-func TestProcessListUsesConfiguredProcRoot(t *testing.T) {
+func TestProcessListUsesConfiguredProcRootWithoutCommandLine(t *testing.T) {
 	handler, _ := newTestHandler(t)
 
 	body := `{"operation": "process.list"}`
@@ -178,6 +179,115 @@ func TestProcessListUsesConfiguredProcRoot(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"count"`) {
 		t.Fatalf("expected count in response, got %s", rec.Body.String())
 	}
+	if strings.Contains(rec.Body.String(), `"cmdline"`) || strings.Contains(rec.Body.String(), "--flag") {
+		t.Fatalf("process response disclosed command-line data: %s", rec.Body.String())
+	}
+}
+
+func TestDisabledOperationIsNotAdvertisedOrExecutable(t *testing.T) {
+	handler, _ := newTestHandlerWithConfig(t, func(cfg *Config) {
+		cfg.EnabledOperations = []string{operationCapabilitiesDescribe, operationHostInfo}
+	})
+
+	rec := performJSONRequest(t, handler, `{"operation":"process.list"}`)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"code":"operation_disabled"`) {
+		t.Fatalf("expected disabled operation response, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), operationProcessList) {
+		t.Fatalf("disabled operation was advertised: %s", rec.Body.String())
+	}
+}
+
+func TestCapabilitiesDescribeCanBeDisabled(t *testing.T) {
+	handler, _ := newTestHandlerWithConfig(t, func(cfg *Config) {
+		cfg.EnabledOperations = []string{operationHostInfo}
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"code":"operation_disabled"`) {
+		t.Fatalf("expected disabled operation response, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHostInfoReturnsOnlyConfiguredFields(t *testing.T) {
+	handler, _ := newTestHandlerWithConfig(t, func(cfg *Config) {
+		cfg.HostInfoFields = []string{hostInfoArch}
+	})
+
+	rec := performJSONRequest(t, handler, `{"operation":"host.info"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload ResponseEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	data, ok := payload.Data.(map[string]any)
+	if !ok || len(data) != 1 || data[hostInfoArch] == nil {
+		t.Fatalf("expected only arch host info, got %#v", payload.Data)
+	}
+	if strings.Contains(rec.Body.String(), "os_release_raw") {
+		t.Fatalf("host info included unmanaged os-release data: %s", rec.Body.String())
+	}
+}
+
+func TestFilesystemAuditIncludesCallerAndTarget(t *testing.T) {
+	handler, root := newTestHandler(t)
+	target := filepath.ToSlash(filepath.Join(root, "workspace", "sample.txt"))
+
+	rec := performJSONRequest(t, handler, `{"operation":"filesystem.stat","target":{"path":"`+target+`"}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	auditData, err := os.ReadFile(filepath.Join(root, "audit.log"))
+	if err != nil {
+		t.Fatalf("read audit log: %v", err)
+	}
+	var event AuditEvent
+	if err := json.Unmarshal(bytes.TrimSpace(auditData), &event); err != nil {
+		t.Fatalf("decode audit event: %v", err)
+	}
+	if event.CallerID != credentialID("test-token") || event.TargetPath != target {
+		t.Fatalf("unexpected audit identity or target: %+v", event)
+	}
+	if strings.Contains(string(auditData), "test-token") {
+		t.Fatalf("audit log disclosed bearer token: %s", auditData)
+	}
+}
+
+func TestAuditFailureWithholdsOperationResult(t *testing.T) {
+	handler, _ := newTestHandlerWithRecorder(t, nil, failingAuditRecorder{})
+
+	rec := performJSONRequest(t, handler, `{"operation":"host.info"}`)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"audit_unavailable"`) || strings.Contains(rec.Body.String(), `"data"`) {
+		t.Fatalf("expected withheld result, got %s", rec.Body.String())
+	}
+}
+
+func TestAuditFailureWithholdsCapabilities(t *testing.T) {
+	handler, _ := newTestHandlerWithRecorder(t, nil, failingAuditRecorder{})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"audit_unavailable"`) || strings.Contains(rec.Body.String(), `"operations"`) {
+		t.Fatalf("expected withheld capabilities, got %s", rec.Body.String())
+	}
 }
 
 func newTestHandler(t *testing.T) (http.Handler, string) {
@@ -185,6 +295,14 @@ func newTestHandler(t *testing.T) (http.Handler, string) {
 }
 
 func newTestHandlerWithConfig(t *testing.T, configure func(*Config)) (http.Handler, string) {
+	return newTestHandlerWithRecorder(t, configure, nil)
+}
+
+func newTestHandlerWithRecorder(
+	t *testing.T,
+	configure func(*Config),
+	recorder AuditRecorder,
+) (http.Handler, string) {
 	t.Helper()
 
 	root := t.TempDir()
@@ -209,12 +327,20 @@ func newTestHandlerWithConfig(t *testing.T, configure func(*Config)) (http.Handl
 	if err := os.WriteFile(filepath.Join(procRoot, "100", "cmdline"), []byte("testproc\x00--flag\x00"), 0o644); err != nil {
 		t.Fatalf("write proc cmdline: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(procRoot, "uptime"), []byte("42.5 10.0\n"), 0o644); err != nil {
+		t.Fatalf("write proc uptime: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(procRoot, "version"), []byte("test kernel\n"), 0o644); err != nil {
+		t.Fatalf("write proc version: %v", err)
+	}
 
 	cfg := Config{
 		BindAddr:          ":0",
 		AuthTokens:        []string{"test-token"},
 		AllowedRoots:      []string{workspace},
 		ProcRoot:          procRoot,
+		EnabledOperations: allOperationsForTest(),
+		HostInfoFields:    defaultHostInfoFields(),
 		MaxRequestBytes:   1024,
 		MaxReadBytes:      16,
 		MaxTailBytes:      16,
@@ -225,12 +351,29 @@ func newTestHandlerWithConfig(t *testing.T, configure func(*Config)) (http.Handl
 	if configure != nil {
 		configure(&cfg)
 	}
-	auditor, err := NewAuditor(cfg.AuditPath)
-	if err != nil {
-		t.Fatalf("new auditor: %v", err)
+	if recorder == nil {
+		auditor, err := NewAuditor(cfg.AuditPath)
+		if err != nil {
+			t.Fatalf("new auditor: %v", err)
+		}
+		recorder = auditor
 	}
-	service := NewService(cfg, auditor)
+	service := NewService(cfg, recorder)
 	return NewHandler(service, cfg), root
+}
+
+type failingAuditRecorder struct{}
+
+func (failingAuditRecorder) Record(AuditEvent) error {
+	return errors.New("simulated audit failure")
+}
+
+func allOperationsForTest() []string {
+	operations := make([]string, 0, len(operationCatalog))
+	for _, capability := range operationCatalog {
+		operations = append(operations, capability.Name)
+	}
+	return operations
 }
 
 func performJSONRequest(t *testing.T, handler http.Handler, body string) *httptest.ResponseRecorder {

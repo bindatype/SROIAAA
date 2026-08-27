@@ -17,6 +17,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("create auditor: %v", err)
 	}
+	defer auditor.Close()
 
 	service := agent.NewService(cfg, auditor)
 	server := newHTTPServer(cfg, agent.NewHandler(service, cfg))

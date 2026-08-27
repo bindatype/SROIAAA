@@ -23,6 +23,8 @@ type Config struct {
 	AuthTokens        []string
 	AllowedRoots      []string
 	ProcRoot          string
+	EnabledOperations []string
+	HostInfoFields    []string
 	MaxRequestBytes   int64
 	MaxReadBytes      int64
 	MaxTailBytes      int64
@@ -36,10 +38,29 @@ type Config struct {
 }
 
 func LoadConfigFromEnv() (Config, error) {
+	enabledOperations, err := loadConfiguredNames(
+		"SROIAAA_ENABLED_OPERATIONS",
+		defaultEnabledOperations(),
+		knownOperations,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	hostInfoFields, err := loadConfiguredNames(
+		"SROIAAA_HOST_INFO_FIELDS",
+		defaultHostInfoFields(),
+		knownHostInfoFields,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		BindAddr:          envOrDefault("SROIAAA_BIND_ADDR", defaultBindAddr),
 		AuthTokens:        loadAuthTokensFromEnv(),
 		ProcRoot:          envOrDefault("SROIAAA_PROC_ROOT", "/proc"),
+		EnabledOperations: enabledOperations,
+		HostInfoFields:    hostInfoFields,
 		AuditPath:         envOrDefault("SROIAAA_AUDIT_PATH", "runtime/audit.log"),
 		MaxRequestBytes:   envInt64("SROIAAA_MAX_REQUEST_BYTES", defaultMaxRequestBytes),
 		MaxReadBytes:      envInt64("SROIAAA_MAX_READ_BYTES", 65536),
@@ -71,6 +92,9 @@ func LoadConfigFromEnv() (Config, error) {
 	}
 	if !filepath.IsAbs(cfg.ProcRoot) {
 		return Config{}, fmt.Errorf("proc root must be absolute: %q", cfg.ProcRoot)
+	}
+	if containsName(cfg.EnabledOperations, operationHostInfo) && len(cfg.HostInfoFields) == 0 {
+		return Config{}, fmt.Errorf("host.info requires at least one configured host info field")
 	}
 	return cfg, nil
 }
@@ -129,4 +153,38 @@ func loadAuthTokensFromEnv() []string {
 		tokens = append(tokens, value)
 	}
 	return tokens
+}
+
+func loadConfiguredNames(key string, defaults []string, known map[string]struct{}) ([]string, error) {
+	raw, configured := os.LookupEnv(key)
+	if !configured {
+		return append([]string(nil), defaults...), nil
+	}
+
+	names := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, value := range strings.Split(raw, ",") {
+		name := strings.TrimSpace(value)
+		if name == "" {
+			continue
+		}
+		if _, ok := known[name]; !ok {
+			return nil, fmt.Errorf("%s contains unsupported value %q", key, name)
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	return names, nil
+}
+
+func containsName(names []string, target string) bool {
+	for _, name := range names {
+		if name == target {
+			return true
+		}
+	}
+	return false
 }

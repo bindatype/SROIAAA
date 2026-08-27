@@ -12,7 +12,7 @@ empirically.
 
 ## Phase One scope
 
-The initial operation set is deliberately narrow:
+The compiled operation catalog is deliberately narrow:
 
 - `host.info`
 - `filesystem.list`
@@ -22,6 +22,10 @@ The initial operation set is deliberately narrow:
 - `process.list`
 - `capabilities.describe`
 
+All except `process.list` are enabled by default. Process inspection is
+an explicit opt-in and returns only PID, parent PID, name, and state; it
+never reads or returns command-line arguments.
+
 Core constraints:
 
 - absolute paths only
@@ -29,8 +33,10 @@ Core constraints:
 - symlink-aware root enforcement
 - bounded reads, tails, and fan-out
 - bounded HTTP request bodies and server deadlines
+- explicit operation and host-information field allowlists
 - read-only API surface
-- structured JSON-line audit log
+- audit-before-return for authenticated data responses
+- private structured JSON-line audit log with caller fingerprints and target paths
 
 ## Layout
 
@@ -113,6 +119,7 @@ The compose harness:
 - mounts sample data read-only at `/workspace` and `/var/log/sroiaaa`
 - uses a read-only container filesystem
 - drops Linux capabilities
+- explicitly enables the safe default operation and host-information policies
 - writes audit logs to `./runtime/audit.log`
 
 The Dockerfile also honors Docker's target platform arguments, so it can
@@ -199,6 +206,8 @@ Configuration is environment-driven:
 - `SROIAAA_AUTH_TOKENS` optional comma-separated additional valid tokens for rotation
 - `SROIAAA_ALLOWED_ROOTS` default `/workspace,/tmp,/var/log/sroiaaa`
 - `SROIAAA_PROC_ROOT` default `/proc`
+- `SROIAAA_ENABLED_OPERATIONS` default `capabilities.describe,host.info,filesystem.list,filesystem.stat,filesystem.read,filesystem.tail`
+- `SROIAAA_HOST_INFO_FIELDS` default `hostname,os,arch,cpus,uptime_seconds,kernel_version`
 - `SROIAAA_MAX_REQUEST_BYTES` default `65536`
 - `SROIAAA_MAX_READ_BYTES` default `65536`
 - `SROIAAA_MAX_TAIL_BYTES` default `65536`
@@ -209,6 +218,23 @@ Configuration is environment-driven:
 - `SROIAAA_READ_TIMEOUT` default `15s`
 - `SROIAAA_WRITE_TIMEOUT` default `30s`
 - `SROIAAA_IDLE_TIMEOUT` default `60s`
+
+Unknown operation or host-information names are rejected during startup.
+Setting `SROIAAA_ENABLED_OPERATIONS` to an explicit empty value disables
+all operations. If `host.info` is enabled, at least one allowed host field
+must be configured.
+
+To opt into bounded process metadata, append `process.list` explicitly:
+
+```bash
+export SROIAAA_ENABLED_OPERATIONS='capabilities.describe,host.info,filesystem.list,filesystem.stat,filesystem.read,filesystem.tail,process.list'
+```
+
+The audit log is forced to mode `0600`. Authenticated events contain a
+stable one-way token fingerprint as `caller_id`; bearer tokens are never
+written to the log. Filesystem events also contain the requested
+`target_path`. If an authenticated result cannot be audited, the agent
+withholds it and returns `503 audit_unavailable`.
 
 ## Broker routing experiment
 

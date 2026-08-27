@@ -9,6 +9,8 @@ services:
       SROIAAA_AUTH_TOKEN: "${SROIAAA_AUTH_TOKEN:?set SROIAAA_AUTH_TOKEN}"
       SROIAAA_ALLOWED_ROOTS: "/workspace,/tmp,/var/log/sroiaaa"
       SROIAAA_PROC_ROOT: "/proc"
+      SROIAAA_ENABLED_OPERATIONS: "capabilities.describe,host.info,filesystem.list,filesystem.stat,filesystem.read,filesystem.tail"
+      SROIAAA_HOST_INFO_FIELDS: "hostname,os,arch,cpus,uptime_seconds,kernel_version"
       SROIAAA_MAX_REQUEST_BYTES: "65536"
       SROIAAA_MAX_READ_BYTES: "65536"
       SROIAAA_MAX_TAIL_BYTES: "65536"

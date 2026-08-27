@@ -1,13 +1,16 @@
 package agent
 
 import (
+	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -17,6 +20,10 @@ type Handler struct {
 	service *Service
 	cfg     Config
 }
+
+type requestContextKey string
+
+const callerIDContextKey requestContextKey = "caller_id"
 
 func NewHandler(service *Service, cfg Config) http.Handler {
 	handler := &Handler{
@@ -34,7 +41,8 @@ func NewHandler(service *Service, cfg Config) http.Handler {
 func (h *Handler) requireBearerAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, ok := bearerToken(r.Header.Get("Authorization"))
-		if !ok || !h.validAuthToken(token) {
+		callerID, authenticated := h.authenticateToken(token)
+		if !ok || !authenticated {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="sroiaaa"`)
 			writeJSON(w, http.StatusUnauthorized, map[string]any{
 				"status": "error",
@@ -45,7 +53,8 @@ func (h *Handler) requireBearerAuth(next http.Handler) http.Handler {
 			})
 			return
 		}
-		next.ServeHTTP(w, r)
+		ctx := context.WithValue(r.Context(), callerIDContextKey, callerID)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -61,13 +70,27 @@ func bearerToken(header string) (string, bool) {
 	return token, true
 }
 
-func (h *Handler) validAuthToken(candidate string) bool {
+func (h *Handler) authenticateToken(candidate string) (string, bool) {
+	matched := 0
+	callerID := ""
 	for _, expected := range h.cfg.AuthTokens {
-		if subtle.ConstantTimeCompare([]byte(candidate), []byte(expected)) == 1 {
-			return true
+		equal := subtle.ConstantTimeCompare([]byte(candidate), []byte(expected))
+		matched |= equal
+		if equal == 1 {
+			callerID = credentialID(expected)
 		}
 	}
-	return false
+	return callerID, matched == 1
+}
+
+func credentialID(token string) string {
+	digest := sha256.Sum256([]byte(token))
+	return "token:" + hex.EncodeToString(digest[:8])
+}
+
+func callerIDFromRequest(r *http.Request) string {
+	callerID, _ := r.Context().Value(callerIDContextKey).(string)
+	return callerID
 }
 
 func (h *Handler) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -83,7 +106,51 @@ func (h *Handler) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
-	writeJSON(w, http.StatusOK, h.service.Capabilities())
+	start := time.Now()
+	requestID := newRequestID()
+	if !h.service.operationEnabled(operationCapabilitiesDescribe) {
+		message := "operation is disabled by agent policy"
+		event := AuditEvent{
+			RequestID:  requestID,
+			Operation:  operationCapabilitiesDescribe,
+			Status:     "error",
+			Code:       "operation_disabled",
+			Message:    message,
+			DurationMS: time.Since(start).Milliseconds(),
+			RemoteAddr: r.RemoteAddr,
+			CallerID:   callerIDFromRequest(r),
+		}
+		if !h.recordAudit(w, event) {
+			return
+		}
+		writeJSON(w, http.StatusForbidden, ResponseEnvelope{
+			RequestID: requestID,
+			Operation: operationCapabilitiesDescribe,
+			Status:    "error",
+			Metadata: ResponseMeta{
+				Timestamp:  start.UTC().Format(time.RFC3339Nano),
+				DurationMS: event.DurationMS,
+				Agent:      agentName,
+				Version:    agentVersion,
+			},
+			Error: &ErrorPayload{Code: event.Code, Message: message},
+		})
+		return
+	}
+
+	capabilities := h.service.Capabilities()
+	event := AuditEvent{
+		RequestID:  requestID,
+		Operation:  operationCapabilitiesDescribe,
+		Status:     "ok",
+		DurationMS: time.Since(start).Milliseconds(),
+		RemoteAddr: r.RemoteAddr,
+		CallerID:   callerIDFromRequest(r),
+	}
+	if !h.recordAudit(w, event) {
+		return
+	}
+	writeJSON(w, http.StatusOK, capabilities)
 }
 
 func (h *Handler) handleOperations(w http.ResponseWriter, r *http.Request) {
@@ -103,26 +170,26 @@ func (h *Handler) handleOperations(w http.ResponseWriter, r *http.Request) {
 			code = "request_too_large"
 			message = fmt.Sprintf("request body exceeds %d bytes", h.cfg.MaxRequestBytes)
 		}
-		h.writeRequestError(w, r, req.Operation, statusCode, code, message)
+		h.writeRequestError(w, r, req, statusCode, code, message)
 		return
 	}
 
 	resp, statusCode := h.service.Execute(r.Context(), req)
-	metadata := map[string]any{}
-	if req.Operation == "filesystem.read" || req.Operation == "filesystem.tail" ||
-		req.Operation == "filesystem.list" || req.Operation == "filesystem.stat" {
-		metadata["allowed_roots"] = h.cfg.AllowedRoots
-	}
-	_ = h.service.auditor.Record(AuditEvent{
+	event := AuditEvent{
 		RequestID:  resp.RequestID,
 		Operation:  req.Operation,
 		Status:     resp.Status,
 		DurationMS: resp.Metadata.DurationMS,
 		RemoteAddr: r.RemoteAddr,
-		Metadata:   metadata,
+		CallerID:   callerIDFromRequest(r),
+		TargetPath: auditTargetPath(req),
+		Metadata:   auditMetadata(req, h.cfg),
 		Code:       errorCode(resp.Error),
 		Message:    errorMessage(resp.Error),
-	})
+	}
+	if !h.recordAudit(w, event) {
+		return
+	}
 	writeJSON(w, statusCode, resp)
 }
 
@@ -148,14 +215,14 @@ func (h *Handler) decodeRequest(w http.ResponseWriter, r *http.Request, req *Req
 func (h *Handler) writeRequestError(
 	w http.ResponseWriter,
 	r *http.Request,
-	operation string,
+	req RequestEnvelope,
 	statusCode int,
 	code string,
 	message string,
 ) {
 	resp := ResponseEnvelope{
 		RequestID: newRequestID(),
-		Operation: operation,
+		Operation: req.Operation,
 		Status:    "error",
 		Metadata: ResponseMeta{
 			Timestamp:  time.Now().UTC().Format(time.RFC3339Nano),
@@ -169,16 +236,72 @@ func (h *Handler) writeRequestError(
 			Message: message,
 		},
 	}
-	writeJSON(w, statusCode, resp)
-	_ = h.service.auditor.Record(AuditEvent{
+	event := AuditEvent{
 		RequestID:  resp.RequestID,
-		Operation:  operation,
+		Operation:  req.Operation,
 		Status:     "error",
 		Code:       code,
 		Message:    message,
 		DurationMS: 0,
 		RemoteAddr: r.RemoteAddr,
+		CallerID:   callerIDFromRequest(r),
+		TargetPath: auditTargetPath(req),
+	}
+	if !h.recordAudit(w, event) {
+		return
+	}
+	writeJSON(w, statusCode, resp)
+}
+
+func (h *Handler) recordAudit(w http.ResponseWriter, event AuditEvent) bool {
+	var err error
+	if h.service.auditor == nil {
+		err = errors.New("audit recorder is not configured")
+	} else {
+		err = h.service.auditor.Record(event)
+	}
+	if err == nil {
+		return true
+	}
+
+	log.Printf("audit record failed request_id=%s operation=%s: %v", event.RequestID, event.Operation, err)
+	writeJSON(w, http.StatusServiceUnavailable, ResponseEnvelope{
+		RequestID: event.RequestID,
+		Operation: event.Operation,
+		Status:    "error",
+		Metadata: ResponseMeta{
+			Timestamp:  time.Now().UTC().Format(time.RFC3339Nano),
+			DurationMS: event.DurationMS,
+			Truncated:  false,
+			Agent:      agentName,
+			Version:    agentVersion,
+		},
+		Error: &ErrorPayload{
+			Code:    "audit_unavailable",
+			Message: "request result withheld because the audit record could not be written",
+		},
 	})
+	return false
+}
+
+func auditTargetPath(req RequestEnvelope) string {
+	switch req.Operation {
+	case operationFilesystemList, operationFilesystemStat, operationFilesystemRead, operationFilesystemTail:
+		var target pathTarget
+		if err := json.Unmarshal(req.Target, &target); err == nil {
+			return target.Path
+		}
+	}
+	return ""
+}
+
+func auditMetadata(req RequestEnvelope, cfg Config) map[string]any {
+	switch req.Operation {
+	case operationFilesystemList, operationFilesystemStat, operationFilesystemRead, operationFilesystemTail:
+		return map[string]any{"allowed_roots": cfg.AllowedRoots}
+	default:
+		return nil
+	}
 }
 
 func writeJSON(w http.ResponseWriter, statusCode int, payload any) {

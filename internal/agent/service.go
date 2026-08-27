@@ -24,32 +24,39 @@ const (
 )
 
 type Service struct {
-	cfg     Config
-	auditor *Auditor
+	cfg               Config
+	auditor           AuditRecorder
+	enabledOperations map[string]struct{}
+	hostInfoFields    map[string]struct{}
 }
 
-func NewService(cfg Config, auditor *Auditor) *Service {
+func NewService(cfg Config, auditor AuditRecorder) *Service {
 	cfg.AllowedRoots = canonicalizeRoots(cfg.AllowedRoots)
-	return &Service{cfg: cfg, auditor: auditor}
+	return &Service{
+		cfg:               cfg,
+		auditor:           auditor,
+		enabledOperations: nameSet(cfg.EnabledOperations),
+		hostInfoFields:    nameSet(cfg.HostInfoFields),
+	}
 }
 
 func (s *Service) Capabilities() CapabilitiesResponse {
+	operations := make([]OperationCapability, 0, len(operationCatalog))
+	for _, capability := range operationCatalog {
+		if s.operationEnabled(capability.Name) {
+			operations = append(operations, capability)
+		}
+	}
 	return CapabilitiesResponse{
-		Operations: []OperationCapability{
-			{Name: "capabilities.describe", Description: "Describe supported operations and limits."},
-			{Name: "host.info", Description: "Return basic host and runtime information."},
-			{Name: "filesystem.list", Description: "List entries in an allowlisted directory.", TargetKinds: []string{"directory"}},
-			{Name: "filesystem.stat", Description: "Return metadata for an allowlisted path.", TargetKinds: []string{"file", "directory"}},
-			{Name: "filesystem.read", Description: "Read a bounded byte range from an allowlisted file.", TargetKinds: []string{"file"}},
-			{Name: "filesystem.tail", Description: "Return the trailing bytes from an allowlisted file.", TargetKinds: []string{"file"}},
-			{Name: "process.list", Description: "List processes from procfs with bounded fan-out."},
-		},
+		Operations: operations,
 		Limits: map[string]any{
 			"allowed_roots":       s.cfg.AllowedRoots,
+			"host_info_fields":    s.cfg.HostInfoFields,
 			"max_read_bytes":      s.cfg.MaxReadBytes,
 			"max_tail_bytes":      s.cfg.MaxTailBytes,
 			"max_list_entries":    s.cfg.MaxListEntries,
 			"max_process_entries": s.cfg.MaxProcessEntries,
+			"process_cmdline":     false,
 		},
 	}
 }
@@ -78,23 +85,27 @@ func (s *Service) Execute(ctx context.Context, req RequestEnvelope) (ResponseEnv
 		apiErr    *APIError
 	)
 
-	switch req.Operation {
-	case "capabilities.describe":
-		data = s.Capabilities()
-	case "host.info":
-		data, truncated, apiErr = s.hostInfo()
-	case "filesystem.list":
-		data, truncated, apiErr = s.filesystemList(req)
-	case "filesystem.stat":
-		data, truncated, apiErr = s.filesystemStat(req)
-	case "filesystem.read":
-		data, truncated, apiErr = s.filesystemRead(req)
-	case "filesystem.tail":
-		data, truncated, apiErr = s.filesystemTail(req)
-	case "process.list":
-		data, truncated, apiErr = s.processList()
-	default:
+	if _, known := knownOperations[req.Operation]; !known {
 		apiErr = newAPIError(400, "unknown_operation", "operation is not supported")
+	} else if !s.operationEnabled(req.Operation) {
+		apiErr = newAPIError(403, "operation_disabled", "operation is disabled by agent policy")
+	} else {
+		switch req.Operation {
+		case operationCapabilitiesDescribe:
+			data = s.Capabilities()
+		case operationHostInfo:
+			data, truncated, apiErr = s.hostInfo()
+		case operationFilesystemList:
+			data, truncated, apiErr = s.filesystemList(req)
+		case operationFilesystemStat:
+			data, truncated, apiErr = s.filesystemStat(req)
+		case operationFilesystemRead:
+			data, truncated, apiErr = s.filesystemRead(req)
+		case operationFilesystemTail:
+			data, truncated, apiErr = s.filesystemTail(req)
+		case operationProcessList:
+			data, truncated, apiErr = s.processList()
+		}
 	}
 
 	resp.Metadata.DurationMS = time.Since(start).Milliseconds()
@@ -127,34 +138,39 @@ type readParams struct {
 }
 
 type processRecord struct {
-	PID     int    `json:"pid"`
-	PPID    int    `json:"ppid"`
-	Name    string `json:"name"`
-	State   string `json:"state"`
-	Cmdline string `json:"cmdline"`
+	PID   int    `json:"pid"`
+	PPID  int    `json:"ppid"`
+	Name  string `json:"name"`
+	State string `json:"state"`
 }
 
 func (s *Service) hostInfo() (any, bool, *APIError) {
-	hostname, err := os.Hostname()
-	if err != nil {
-		return nil, false, newAPIError(500, "host_info_failed", "could not determine hostname")
+	info := map[string]any{}
+	if s.hostInfoFieldEnabled(hostInfoHostname) {
+		hostname, err := os.Hostname()
+		if err != nil {
+			return nil, false, newAPIError(500, "host_info_failed", "could not determine hostname")
+		}
+		info[hostInfoHostname] = hostname
 	}
-
-	info := map[string]any{
-		"hostname": hostname,
-		"os":       runtime.GOOS,
-		"arch":     runtime.GOARCH,
-		"cpus":     runtime.NumCPU(),
-		"pid":      os.Getpid(),
+	if s.hostInfoFieldEnabled(hostInfoOS) {
+		info[hostInfoOS] = runtime.GOOS
 	}
-	if uptime, ok := readProcUptime(s.cfg.ProcRoot); ok {
-		info["uptime_seconds"] = uptime
+	if s.hostInfoFieldEnabled(hostInfoArch) {
+		info[hostInfoArch] = runtime.GOARCH
 	}
-	if version, ok := readTrimmedFile(filepath.Join(s.cfg.ProcRoot, "version")); ok {
-		info["kernel_version"] = version
+	if s.hostInfoFieldEnabled(hostInfoCPUs) {
+		info[hostInfoCPUs] = runtime.NumCPU()
 	}
-	if release, ok := readTrimmedFile("/etc/os-release"); ok {
-		info["os_release_raw"] = release
+	if s.hostInfoFieldEnabled(hostInfoUptimeSeconds) {
+		if uptime, ok := readProcUptime(s.cfg.ProcRoot); ok {
+			info[hostInfoUptimeSeconds] = uptime
+		}
+	}
+	if s.hostInfoFieldEnabled(hostInfoKernelVersion) {
+		if version, ok := readTrimmedFile(filepath.Join(s.cfg.ProcRoot, "version")); ok {
+			info[hostInfoKernelVersion] = version
+		}
 	}
 	return info, false, nil
 }
@@ -373,10 +389,6 @@ func (s *Service) processList() (any, bool, *APIError) {
 		if content, err := os.ReadFile(statusPath); err == nil {
 			parseProcStatus(content, &record)
 		}
-		cmdlinePath := filepath.Join(s.cfg.ProcRoot, entry.Name(), "cmdline")
-		if content, err := os.ReadFile(cmdlinePath); err == nil {
-			record.Cmdline = strings.ReplaceAll(strings.TrimRight(string(content), "\x00"), "\x00", " ")
-		}
 		records = append(records, record)
 	}
 
@@ -496,6 +508,24 @@ func minInt(left, right int) int {
 		return left
 	}
 	return right
+}
+
+func nameSet(names []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		set[name] = struct{}{}
+	}
+	return set
+}
+
+func (s *Service) operationEnabled(operation string) bool {
+	_, ok := s.enabledOperations[operation]
+	return ok
+}
+
+func (s *Service) hostInfoFieldEnabled(field string) bool {
+	_, ok := s.hostInfoFields[field]
+	return ok
 }
 
 func canonicalizeRoots(roots []string) []string {
