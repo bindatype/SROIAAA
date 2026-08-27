@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/maclach/sroiaaa/internal/broker"
@@ -20,6 +21,7 @@ const (
 	wazuhUsernameEnv  = "WAZUH_API_USERNAME"
 	wazuhPasswordEnv  = "WAZUH_API_PASSWORD"
 	pegasusDSNEnv     = "SROIAAA_PEGASUS_DSN"
+	pegasusMaxRowsEnv = "SROIAAA_PEGASUS_MAX_ROWS"
 )
 
 func main() {
@@ -199,7 +201,7 @@ func buildConnectors(plan broker.RoutePlan, options connectorOptions) ([]connect
 		if dsn == "" {
 			return nil, fmt.Errorf("plan needs the accounting database: %s must be set and exported", pegasusDSNEnv)
 		}
-		pegasus, err := connector.NewPegasusConnector(connector.PegasusConfig{DSN: dsn})
+		pegasus, err := connector.NewPegasusConnector(connector.PegasusConfig{DSN: dsn, MaxRows: pegasusMaxRows()})
 		if err != nil {
 			return nil, err
 		}
@@ -214,4 +216,18 @@ func buildConnectors(plan broker.RoutePlan, options connectorOptions) ([]connect
 		}
 	}
 	return built, nil
+}
+
+// pegasusMaxRows reads the row cap override, falling back to the connector's
+// default when unset or unparseable.
+func pegasusMaxRows() int {
+	value := os.Getenv(pegasusMaxRowsEnv)
+	if value == "" {
+		return 0
+	}
+	rows, err := strconv.Atoi(value)
+	if err != nil || rows <= 0 {
+		return 0
+	}
+	return rows
 }

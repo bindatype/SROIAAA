@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ const (
 	wazuhUsernameEnv      = "WAZUH_API_USERNAME"
 	wazuhPasswordEnv      = "WAZUH_API_PASSWORD"
 	pegasusDSNEnv         = "SROIAAA_PEGASUS_DSN"
+	pegasusMaxRowsEnv     = "SROIAAA_PEGASUS_MAX_ROWS"
 
 	// defaultModel matched the larger models on routing and accuracy at a
 	// fraction of their latency in the 2026-08-27 model survey.
@@ -154,7 +156,7 @@ func buildSession(policyPath, model, endpoint, zabbixEndpoint, wazuhEndpoint str
 		connectors = append(connectors, wazuh)
 	}
 	if dsn := os.Getenv(pegasusDSNEnv); dsn != "" {
-		pegasus, err := connector.NewPegasusConnector(connector.PegasusConfig{DSN: dsn})
+		pegasus, err := connector.NewPegasusConnector(connector.PegasusConfig{DSN: dsn, MaxRows: pegasusMaxRows()})
 		if err != nil {
 			return nil, err
 		}
@@ -169,4 +171,18 @@ func buildSession(policyPath, model, endpoint, zabbixEndpoint, wazuhEndpoint str
 		return nil, err
 	}
 	return orchestrator.NewSession(client, router, executor), nil
+}
+
+// pegasusMaxRows reads the row cap override, falling back to the connector's
+// default when unset or unparseable.
+func pegasusMaxRows() int {
+	value := os.Getenv(pegasusMaxRowsEnv)
+	if value == "" {
+		return 0
+	}
+	rows, err := strconv.Atoi(value)
+	if err != nil || rows <= 0 {
+		return 0
+	}
+	return rows
 }

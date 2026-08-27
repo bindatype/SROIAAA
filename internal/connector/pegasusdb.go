@@ -14,7 +14,12 @@ import (
 
 const (
 	pegasusDefaultTimeout = 30 * time.Second
-	pegasusDefaultMaxRows = 1000
+	// A small default is deliberate. It keeps results inside the model's
+	// context, and more importantly it pushes work into SQL: a model handed
+	// fifty rows and asked for a total will summarize them, and summarizing is
+	// where the wrong numbers come from. Raise it with SROIAAA_PEGASUS_MAX_ROWS
+	// if a real question needs more.
+	pegasusDefaultMaxRows = 50
 	pegasusMaxCellBytes   = 4096
 	pegasusMaxTotalBytes  = 512 * 1024
 )
@@ -152,7 +157,10 @@ func (c *PegasusConnector) Execute(ctx context.Context, step broker.RouteStep) (
 		"columns":  len(columns),
 	}
 	if truncated {
+		// Named so that a reader of the evidence cannot mistake a capped result
+		// for a complete one.
 		summary["row_limit"] = rowLimit
+		summary["result_was_capped"] = 1
 	}
 
 	return Evidence{

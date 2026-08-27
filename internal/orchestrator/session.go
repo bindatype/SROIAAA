@@ -85,6 +85,14 @@ its range returns nothing, which is not the same as nothing having happened.
 Always bound a query with a WHERE clause on time, and aggregate in SQL rather
 than listing rows when the question is about counts.
 
+Results are capped at a small number of rows. If the evidence summary contains
+result_was_capped, you were given an arbitrary slice of a larger result and you
+must NOT summarize, total, or characterize it. Say the result was capped, then
+issue a second query that does the work in SQL: GROUP BY with COUNT or SUM to
+get totals, ORDER BY with LIMIT to get a top-N, MIN, MAX, AVG or MEDIAN for
+distributions. Counting rows yourself is exactly how wrong numbers are
+produced; the database can count them correctly.
+
 Worked examples, taken from queries this site actually runs:
 
   -- jobs per day for named users over a window
