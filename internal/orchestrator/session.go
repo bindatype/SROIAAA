@@ -285,8 +285,17 @@ func (s *Session) Ask(ctx context.Context, question string) (string, error) {
 		return "", err
 	}
 	if len(choice.Message.ToolCalls) == 0 {
+		// Answering without evidence is legitimate: declining a question no
+		// source can answer is the behaviour we want, and recording it as a
+		// failure would make the audit misleading exactly where refusals matter.
 		s.record("model_answered_directly", "no tool call proposed", true)
-		return choice.Message.Content, nil
+		answer := strings.TrimSpace(choice.Message.Content)
+		s.event.AnswerChars = len(answer)
+		if answer == "" {
+			s.event.Status = "failed"
+			return "", fmt.Errorf("model returned neither a tool call nor an answer")
+		}
+		return answer, nil
 	}
 
 	call := choice.Message.ToolCalls[0]
@@ -442,7 +451,13 @@ func (s *Session) retryWithError(ctx context.Context, messages []Message, choice
 		s.record("retry_failed", err.Error(), false)
 		return nil, nil
 	}
+	// A question denied and then corrected is neither a plain denial nor a
+	// clean pass. Recording it as "denied" understates what happened, and as
+	// "allowed" hides that the first attempt was refused.
 	s.record("retry_succeeded", "", true)
+	s.event.Decision = "allowed_on_retry"
+	retryPlanJSON, _ := json.Marshal(plan)
+	s.event.Plan = retryPlanJSON
 	return &result, nil
 }
 
