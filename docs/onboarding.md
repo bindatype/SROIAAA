@@ -42,10 +42,23 @@ You need collaborator access on the repository, or a fork. For two
 partners working closely, collaborator access and shared branches is
 simpler than forks and avoids a round trip on every change.
 
+**Clone the working branch, not `main`.** `main` is deliberately pinned to
+the commit under independent review, so it does not contain the connectors,
+the orchestrator, the evaluations, or this document. A default clone will
+silently give you a much older tree.
+
 ```bash
 git clone https://github.com/bindatype/SROIAAA.git
 cd SROIAAA
+git checkout feat/connectors-and-orchestrator
 go test ./...
+```
+
+Confirm you are on the right tree before going further:
+
+```bash
+git log --oneline -1        # should not be d02e51f
+ls docs/                    # should list adding-a-connector.md
 ```
 
 If the tests pass you have a working toolchain. They need no credentials
