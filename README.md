@@ -249,12 +249,12 @@ network port. The planner turns a small structured intent into a
 deterministic route plan; the executor dispatches each step to a
 connector.
 
-Policy is enforced when a plan is **produced**, not when it is executed.
-`sroiaaa-broker-exec` validates a plan structurally but does not re-check
-it against policy, so a hand-written plan bypasses the router. The fixed
-action tables in each connector still bound what is reachable. Closing
-this gap is a prerequisite for adding a SROIAAA endpoint connector, since
-a hand-written plan could otherwise carry an arbitrary filesystem path.
+Policy is enforced twice. The planner authorizes an intent; the executor
+requires `-policy` and verifies, before running anything, that the plan it
+was handed is one that policy would have produced. A plan is an ordinary
+JSON document arriving from an untrusted caller, so authorization is
+re-established rather than assumed: a substituted path, an inflated limit,
+a swapped operation, or an extra step all fail verification.
 
 | Intent | Route |
 |---|---|
@@ -309,8 +309,11 @@ The same path without a model, one step per pipe:
 ```bash
 echo '{"intent":"monitoring.problems","host":"dss01"}' \
   | go run ./cmd/sroiaaa-broker-plan -policy ./configs/broker-policy.example.json \
-  | go run ./cmd/sroiaaa-broker-exec
+  | go run ./cmd/sroiaaa-broker-exec -policy ./configs/broker-policy.example.json
 ```
+
+Both halves take the policy. The planner uses it to authorize; the executor
+uses it to verify what it was given.
 
 ### What it can and cannot answer
 
@@ -321,7 +324,12 @@ Four intents, and nothing else:
 | agent inventory and connection state | `fleet.inventory` | Wazuh API |
 | one agent's state, by exact name | `agent.status` | Wazuh API |
 | active problem triggers, optionally per host | `monitoring.problems` | Zabbix API |
-| a policy-approved file from an endpoint | `live.evidence` | SROIAAA agent |
+| a policy-approved file from an endpoint | `live.evidence` | SROIAAA agent (not yet built) |
+
+Only intents whose connector exists are offered to the model. There is no
+SROIAAA endpoint connector yet, so `live.evidence` is planned and
+authorized by the broker but withheld from the model-facing tool schema
+until it can execute.
 
 There is **no** source for vulnerabilities or CVEs, installed packages,
 patch level, log contents, user accounts, configuration, or performance

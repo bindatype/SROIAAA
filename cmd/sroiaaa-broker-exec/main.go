@@ -28,6 +28,7 @@ func main() {
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("sroiaaa-broker-exec", flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	policyPath := flags.String("policy", "", "broker policy the plan is verified against (required)")
 	zabbixEndpoint := flags.String("zabbix-endpoint", os.Getenv(zabbixEndpointEnv), "Zabbix JSON-RPC endpoint URL")
 	wazuhEndpoint := flags.String("wazuh-endpoint", os.Getenv(wazuhEndpointEnv), "Wazuh API base URL")
 	wazuhInsecure := flags.Bool("wazuh-insecure", false, "skip TLS verification for the Wazuh API (required where the manager presents a self-signed certificate)")
@@ -36,8 +37,21 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	if *policyPath == "" {
+		fmt.Fprintln(stderr, "sroiaaa-broker-exec: -policy is required")
+		return 2
+	}
+
 	plan, err := decodePlan(stdin)
 	if err != nil {
+		fmt.Fprintf(stderr, "sroiaaa-broker-exec: %v\n", err)
+		return 1
+	}
+
+	// A plan is an ordinary JSON document and arrives here from an untrusted
+	// caller. Authorization happened when the planner ran; it is re-established
+	// here rather than assumed, so that a hand-written plan cannot execute.
+	if err := verifyPlan(*policyPath, plan); err != nil {
 		fmt.Fprintf(stderr, "sroiaaa-broker-exec: %v\n", err)
 		return 1
 	}
@@ -99,6 +113,28 @@ func decodePlan(r io.Reader) (broker.RoutePlan, error) {
 		return broker.RoutePlan{}, fmt.Errorf("route plan contains no steps")
 	}
 	return plan, nil
+}
+
+// verifyPlan requires the plan to be one the policy would have produced.
+func verifyPlan(policyPath string, plan broker.RoutePlan) error {
+	policyFile, err := os.Open(policyPath)
+	if err != nil {
+		return fmt.Errorf("open policy: %w", err)
+	}
+	defer policyFile.Close()
+
+	policy, err := broker.LoadPolicy(policyFile)
+	if err != nil {
+		return err
+	}
+	router, err := broker.NewRouter(policy)
+	if err != nil {
+		return err
+	}
+	if err := router.Verify(plan); err != nil {
+		return fmt.Errorf("plan rejected: %w", err)
+	}
+	return nil
 }
 
 // connectorOptions carries operator-supplied execution details. Nothing here

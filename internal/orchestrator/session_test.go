@@ -187,3 +187,54 @@ func newTestSession(t *testing.T, endpoint string, c connector.Connector) *Sessi
 	}
 	return NewSession(client, router, executor)
 }
+
+func TestSessionOffersOnlyExecutableIntents(t *testing.T) {
+	// A capability advertised with no connector behind it is a capability that
+	// does not exist. The enum must follow what the executor can reach.
+	tests := []struct {
+		name   string
+		source broker.Source
+		want   []string
+		absent string
+	}{
+		{
+			name:   "zabbix only",
+			source: broker.SourceZabbixAPI,
+			want:   []string{"monitoring.problems"},
+			absent: "fleet.inventory",
+		},
+		{
+			name:   "wazuh only",
+			source: broker.SourceWazuhAPI,
+			want:   []string{"fleet.inventory", "agent.status"},
+			absent: "live.evidence",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			session := newTestSession(t, "http://unused.invalid", &fakeConnector{source: test.source})
+			got := strings.Join(session.Intents(), ",")
+			for _, want := range test.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("intents = %q, want it to include %q", got, want)
+				}
+			}
+			if strings.Contains(got, test.absent) {
+				t.Errorf("intents = %q, must not include %q with no connector for it", got, test.absent)
+			}
+		})
+	}
+}
+
+func TestLiveEvidenceIsWithheldUntilItsConnectorExists(t *testing.T) {
+	// There is no SROIAAA endpoint connector yet. Until there is, the intent
+	// must not reach the model: the router would authorize it and execution
+	// would then fail with an internal error.
+	session := newTestSession(t, "http://unused.invalid", &fakeConnector{source: broker.SourceZabbixAPI})
+	for _, intent := range session.Intents() {
+		if intent == string(broker.IntentLiveEvidence) {
+			t.Fatal("live.evidence was offered with no sroiaaa-agent connector registered")
+		}
+	}
+}

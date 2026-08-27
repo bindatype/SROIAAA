@@ -1,6 +1,9 @@
 package broker
 
-import "fmt"
+import (
+	"fmt"
+	"reflect"
+)
 
 const (
 	planVersion          = 1
@@ -146,4 +149,69 @@ func cloneResource(resource Resource) Resource {
 		clone.Params = &params
 	}
 	return clone
+}
+
+// Verify reports whether a plan is one this router would have produced under
+// the current policy.
+//
+// Policy is enforced when a plan is created, but a plan is an ordinary JSON
+// document: anything that can execute one must not assume it came from the
+// planner. Rather than trusting the plan or re-deriving authorization from it,
+// Verify reconstructs every plan the router could legitimately have produced
+// for this intent and requires the submitted plan to equal one of them. A
+// hand-edited path, an inflated limit, or a substituted operation all fail.
+func (r *Router) Verify(plan RoutePlan) error {
+	if len(plan.Steps) == 0 {
+		return newRouteError("invalid_plan", "plan contains no steps")
+	}
+	candidates := r.candidateRequests(plan)
+	if len(candidates) == 0 {
+		return newRouteError("plan_not_authorized", "no authorized request could produce this plan")
+	}
+	for _, candidate := range candidates {
+		produced, err := r.Plan(candidate)
+		if err != nil {
+			continue
+		}
+		if reflect.DeepEqual(produced, plan) {
+			return nil
+		}
+	}
+	return newRouteError("plan_not_authorized", "plan does not match any plan this policy would produce")
+}
+
+// candidateRequests enumerates the route requests that could have produced a
+// plan with this intent and host. Every field the router derives rather than
+// copies -- operation, path, limits -- is deliberately not read from the plan,
+// so a modified value cannot steer the reconstruction toward itself.
+func (r *Router) candidateRequests(plan RoutePlan) []RouteRequest {
+	host := plan.Steps[0].Host
+
+	switch plan.Intent {
+	case IntentFleetInventory:
+		return []RouteRequest{{Intent: plan.Intent}}
+
+	case IntentAgentStatus, IntentMonitoringProblems:
+		return []RouteRequest{{Intent: plan.Intent, Host: host}}
+
+	case IntentLiveEvidence:
+		// The resource alias is consumed during planning and does not appear in
+		// the plan, so every alias this host is authorized for is a candidate.
+		allowed, ok := r.liveHosts[host]
+		if !ok {
+			return nil
+		}
+		requests := make([]RouteRequest, 0, len(allowed))
+		for resource := range allowed {
+			requests = append(requests, RouteRequest{
+				Intent:   plan.Intent,
+				Host:     host,
+				Resource: resource,
+			})
+		}
+		return requests
+
+	default:
+		return nil
+	}
 }

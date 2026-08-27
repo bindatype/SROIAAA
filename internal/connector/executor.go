@@ -60,3 +60,13 @@ func (e *Executor) Execute(ctx context.Context, plan broker.RoutePlan) (Result, 
 	}
 	return result, nil
 }
+
+// Sources lists the sources this executor can reach. Callers use it to avoid
+// offering a capability that would fail at execution time.
+func (e *Executor) Sources() []broker.Source {
+	sources := make([]broker.Source, 0, len(e.connectors))
+	for source := range e.connectors {
+		sources = append(sources, source)
+	}
+	return sources
+}

@@ -55,7 +55,7 @@ Be concise and specific, and name the hosts that matter.`
 // ToolDefinition is the single tool exposed to the model. Its schema is the
 // entire surface a model can influence: an intent, and optionally a host or
 // resource alias. Everything else about execution is resolved by policy.
-func ToolDefinition() any {
+func ToolDefinition(intents []string) any {
 	return map[string]any{
 		"type": "function",
 		"function": map[string]any{
@@ -69,7 +69,7 @@ func ToolDefinition() any {
 				"properties": map[string]any{
 					"intent": map[string]any{
 						"type":        "string",
-						"enum":        []string{"fleet.inventory", "agent.status", "monitoring.problems", "live.evidence"},
+						"enum":        intents,
 						"description": "Which bounded question to ask.",
 					},
 					"host": map[string]any{
@@ -93,6 +93,7 @@ type Session struct {
 	client   *MindRouterClient
 	router   *broker.Router
 	executor *connector.Executor
+	intents  []string
 	trace    []TraceEntry
 }
 
@@ -105,9 +106,27 @@ type TraceEntry struct {
 }
 
 // NewSession wires a model client to a policy router and an executor.
+//
+// Only intents whose source the executor can actually reach are offered to the
+// model. Advertising an intent with no connector behind it presents a
+// capability that does not exist, which is the same failure as answering a
+// question from a source that cannot see it.
 func NewSession(client *MindRouterClient, router *broker.Router, executor *connector.Executor) *Session {
-	return &Session{client: client, router: router, executor: executor}
+	available := make(map[broker.Source]bool)
+	for _, source := range executor.Sources() {
+		available[source] = true
+	}
+	var intents []string
+	for _, intent := range broker.AllIntents() {
+		if source, ok := broker.SourceForIntent(intent); ok && available[source] {
+			intents = append(intents, string(intent))
+		}
+	}
+	return &Session{client: client, router: router, executor: executor, intents: intents}
 }
+
+// Intents lists what this session can actually offer a model.
+func (s *Session) Intents() []string { return s.intents }
 
 // Trace returns the decisions made during the last Ask.
 func (s *Session) Trace() []TraceEntry {
@@ -123,7 +142,7 @@ func (s *Session) Ask(ctx context.Context, question string) (string, error) {
 		{Role: "user", Content: question},
 	}
 
-	choice, err := s.client.Complete(ctx, messages, []any{ToolDefinition()})
+	choice, err := s.client.Complete(ctx, messages, []any{ToolDefinition(s.intents)})
 	if err != nil {
 		return "", err
 	}
