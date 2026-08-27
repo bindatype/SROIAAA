@@ -36,7 +36,10 @@ Core constraints:
 
 ```text
 cmd/sroiaaa-agent/         main program
+cmd/sroiaaa-broker-plan/   broker-v0 route planning CLI
 internal/agent/            API, execution, validation, audit logic
+internal/broker/           deterministic policy and routing kernel
+configs/                   example broker policy
 testdata/workspace/        sample files mounted into the container
 testdata/varlog/           sample log files mounted into the container
 ```
@@ -206,6 +209,44 @@ Configuration is environment-driven:
 - `SROIAAA_READ_TIMEOUT` default `15s`
 - `SROIAAA_WRITE_TIMEOUT` default `30s`
 - `SROIAAA_IDLE_TIMEOUT` default `60s`
+
+## Broker routing experiment
+
+Broker v0 begins as a planning-only executable. It does not listen on a
+network port, hold credentials, or call live data sources yet. Its job is
+to turn a small structured intent into a deterministic route plan.
+
+| Intent | Route |
+|---|---|
+| `fleet.inventory` | Wazuh API `agents.list` |
+| `agent.status` | Wazuh API `agents.status` |
+| `monitoring.problems` | Zabbix API `trigger.get` |
+| `live.evidence` | A fixed SROIAAA operation from broker policy |
+
+MindRouter is used before routing to propose the structured intent and
+after evidence collection to synthesize an answer. It is not permitted to
+choose connector URLs, API methods, SROIAAA operations, or filesystem
+paths.
+
+The broker policy is versioned JSON. `live_hosts` is an authorization
+scope for direct SROIAAA access, not a replacement fleet inventory;
+Wazuh remains the intended inventory source. Resource aliases map to
+fixed operations, canonical paths, and limits. The current broker kernel
+permits only bounded `filesystem.list`, `filesystem.stat`,
+`filesystem.read`, and `filesystem.tail` routes.
+
+Generate a route plan against the safe harness example:
+
+```bash
+printf '%s\n' \
+  '{"intent":"live.evidence","host":"docker-harness","resource":"system-log"}' \
+  | go run ./cmd/sroiaaa-broker-plan \
+      -policy ./configs/broker-policy.example.json
+```
+
+Requests containing unrecognized fields are rejected. In particular,
+adding a model-selected `path`, `operation`, or endpoint to the request
+does not expand broker authority.
 
 ## Empirical catalog workflow
 

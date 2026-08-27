@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "live_hosts": {
+    "docker-harness": {
+      "resources": [
+        "system-log",
+        "workspace-sample"
+      ]
+    }
+  },
+  "resources": {
+    "system-log": {
+      "operation": "filesystem.tail",
+      "path": "/var/log/sroiaaa/system.log",
+      "params": {
+        "max_bytes": 8192
+      }
+    },
+    "workspace-sample": {
+      "operation": "filesystem.read",
+      "path": "/workspace/sample.txt",
+      "params": {
+        "max_bytes": 4096
+      }
+    }
+  }
+}
