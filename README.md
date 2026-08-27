@@ -60,14 +60,9 @@ testdata/varlog/           sample log files mounted into the container
 
 After cloning, define the repository root once:
 
-`main` is pinned to the commit under independent review. Everything
-described below under the evidence loop, evaluations, and connectors lives
-on `feat/connectors-and-orchestrator` until that review closes.
-
 ```bash
 git clone https://github.com/bindatype/SROIAAA.git
 cd SROIAAA
-git checkout feat/connectors-and-orchestrator
 SRO_ROOT="${SRO_ROOT:-$PWD}"
 export SROIAAA_AUTH_TOKEN="${SROIAAA_AUTH_TOKEN:-dev-sroiaaa-token}"
 ```
