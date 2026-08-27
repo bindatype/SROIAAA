@@ -1,0 +1,178 @@
+// Package orchestrator runs the agent loop that connects a human question to
+// bounded evidence and back to a synthesized answer.
+//
+// The model participates twice and holds no authority in either turn. First it
+// proposes a structured intent, which trusted broker policy validates and
+// resolves into a route plan. Then it receives normalized evidence and writes
+// prose. It never selects a connector URL, an API method, a credential, an
+// operation, or a filesystem path.
+package orchestrator
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const (
+	// A cold load of a large model on an idle GPU can exceed two minutes, and
+	// scoring that as a failure hides a working model behind a client defect.
+	defaultTimeout   = 300 * time.Second
+	maxResponseBytes = 1 << 20
+)
+
+// MindRouterConfig carries operator-supplied gateway details.
+type MindRouterConfig struct {
+	Endpoint         string
+	APIKey           string
+	Model            string
+	Timeout          time.Duration
+	MaxResponseBytes int64
+}
+
+// MindRouterClient speaks the OpenAI-compatible chat completions surface.
+type MindRouterClient struct {
+	endpoint         string
+	apiKey           string
+	model            string
+	maxResponseBytes int64
+	client           *http.Client
+}
+
+// NewMindRouterClient validates configuration and returns a client.
+func NewMindRouterClient(config MindRouterConfig) (*MindRouterClient, error) {
+	if config.Endpoint == "" {
+		return nil, fmt.Errorf("mindrouter endpoint is required")
+	}
+	parsed, err := url.Parse(config.Endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("parse mindrouter endpoint: %w", err)
+	}
+	if parsed.Scheme != "https" && parsed.Scheme != "http" {
+		return nil, fmt.Errorf("mindrouter endpoint must be http or https")
+	}
+	if config.APIKey == "" {
+		return nil, fmt.Errorf("mindrouter api key is required")
+	}
+	if config.Model == "" {
+		return nil, fmt.Errorf("mindrouter model is required")
+	}
+
+	timeout := config.Timeout
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	maxBytes := config.MaxResponseBytes
+	if maxBytes <= 0 {
+		maxBytes = maxResponseBytes
+	}
+
+	return &MindRouterClient{
+		endpoint:         strings.TrimRight(config.Endpoint, "/"),
+		apiKey:           config.APIKey,
+		model:            config.Model,
+		maxResponseBytes: maxBytes,
+		client:           &http.Client{Timeout: timeout},
+	}, nil
+}
+
+// Message is one chat message. ToolCalls is set on assistant turns that request
+// a tool; ToolCallID and Name are set on tool result turns.
+type Message struct {
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Name       string     `json:"name,omitempty"`
+}
+
+// ToolCall is a model-proposed tool invocation.
+type ToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+// Choice is one completion alternative.
+type Choice struct {
+	Message      Message `json:"message"`
+	FinishReason string  `json:"finish_reason"`
+}
+
+type completionResponse struct {
+	Choices []Choice `json:"choices"`
+	Error   *struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+	} `json:"error"`
+}
+
+// Complete sends one chat completion request and returns the first choice.
+func (c *MindRouterClient) Complete(ctx context.Context, messages []Message, tools []any) (Choice, error) {
+	body := map[string]any{
+		"model":    c.model,
+		"messages": messages,
+	}
+	if len(tools) > 0 {
+		body["tools"] = tools
+		body["tool_choice"] = "auto"
+	}
+
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return Choice{}, fmt.Errorf("encode completion request: %w", err)
+	}
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+"/v1/chat/completions", bytes.NewReader(payload))
+	if err != nil {
+		return Choice{}, fmt.Errorf("build completion request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	response, err := c.client.Do(request)
+	if err != nil {
+		return Choice{}, fmt.Errorf("mindrouter transport: %w", err)
+	}
+	defer response.Body.Close()
+
+	raw, err := io.ReadAll(io.LimitReader(response.Body, c.maxResponseBytes+1))
+	if err != nil {
+		return Choice{}, fmt.Errorf("read completion response: %w", err)
+	}
+	if int64(len(raw)) > c.maxResponseBytes {
+		return Choice{}, fmt.Errorf("mindrouter response exceeded %d bytes", c.maxResponseBytes)
+	}
+	if response.StatusCode != http.StatusOK {
+		return Choice{}, fmt.Errorf("mindrouter returned HTTP %s: %s", strconv.Itoa(response.StatusCode), truncate(string(raw), 300))
+	}
+
+	var decoded completionResponse
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return Choice{}, fmt.Errorf("decode completion response: %w", err)
+	}
+	if decoded.Error != nil {
+		return Choice{}, fmt.Errorf("mindrouter error: %s", decoded.Error.Message)
+	}
+	if len(decoded.Choices) == 0 {
+		return Choice{}, fmt.Errorf("mindrouter returned no choices")
+	}
+	return decoded.Choices[0], nil
+}
+
+func truncate(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	return s[:limit] + "..."
+}

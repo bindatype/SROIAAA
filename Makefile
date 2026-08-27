@@ -2,7 +2,7 @@ GO ?= go
 DIST ?= dist
 BINARY ?= sroiaaa-agent
 
-.PHONY: test run fmt build-linux-amd64 build-linux-arm64 build-linux-all docker-build docker-up fitness
+.PHONY: test run fmt build-linux-amd64 build-linux-arm64 build-linux-all docker-build docker-up fitness eval-models eval-zabbix
 
 test:
 	$(GO) test ./...
@@ -31,3 +31,11 @@ docker-up:
 
 fitness:
 	sh ./scripts/harness_fitness.sh
+
+# Evaluations need live credentials exported into the environment, which the
+# runtime env file provides:  source ~/.config/sroiaaa/env
+eval-models:
+	python3 ./scripts/eval_models.py
+
+eval-zabbix:
+	python3 ./scripts/eval_zabbix.py

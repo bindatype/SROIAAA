@@ -17,6 +17,32 @@ const (
 	SourceSROIAAA   Source = "sroiaaa-agent"
 )
 
+// SourceForIntent reports which data source an intent routes to. It lets a
+// caller discover, before planning, whether an intent is executable at all --
+// so a model is never offered an intent whose connector does not exist.
+func SourceForIntent(intent Intent) (Source, bool) {
+	switch intent {
+	case IntentFleetInventory, IntentAgentStatus:
+		return SourceWazuhAPI, true
+	case IntentMonitoringProblems:
+		return SourceZabbixAPI, true
+	case IntentLiveEvidence:
+		return SourceSROIAAA, true
+	default:
+		return "", false
+	}
+}
+
+// AllIntents lists every intent the router can plan.
+func AllIntents() []Intent {
+	return []Intent{
+		IntentFleetInventory,
+		IntentAgentStatus,
+		IntentMonitoringProblems,
+		IntentLiveEvidence,
+	}
+}
+
 type RouteRequest struct {
 	Intent   Intent `json:"intent"`
 	Host     string `json:"host,omitempty"`
