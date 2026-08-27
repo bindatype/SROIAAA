@@ -56,12 +56,68 @@ Column semantics that are easy to get wrong:
   not succeed. Do not use it to determine whether a job failed. Use State.
 - Partition is a reserved word in MariaDB. Quote it with backticks.
 
-Table freshness varies and the schema does not say so. The FY tables are
-closed fiscal-year rollups, FY2026 ending 2026-07-13, and nodemetrics stopped
-in 2022. Querying a stale table returns nothing, which is not the same as
-nothing having happened. Prefer runTBL2 for anything recent, always bound the
-query with a WHERE clause on time, and aggregate in SQL rather than listing
-rows when the question is about counts.
+Units and conventions:
+
+- SubmitTime, StartTime and EndTime are unix integers. Bucket them with
+  DATE(FROM_UNIXTIME(SubmitTime)) for days, or
+  DATE_FORMAT(FROM_UNIXTIME(SubmitTime), '%Y-%m-%d %H') for hours.
+- WaitTime, RunTime and Timelimit exist ONLY in the FY tables, not in
+  runTBL2. Any question about wait time, run time or requested time must use
+  a fiscal year table.
+- WaitTime and RunTime are in SECONDS. Divide by 3600 for hours.
+- Timelimit is in MINUTES, so multiply by 60 to compare against RunTime.
+- ` + "`" + `partition` + "`" + ` is a reserved word. Write it lowercase and backtick-quoted.
+- When analysing wait times, exclude jobs that never started and jobs the
+  user abandoned: AND StartTime > 0 AND State <> 'CANCELLED'. Without that,
+  never-started jobs distort every average.
+- This server is MariaDB 10.3, where percentiles are WINDOW functions and
+  require OVER. Write MEDIAN(WaitTime) OVER (PARTITION BY netid) with a
+  SELECT DISTINCT, not a plain aggregate with GROUP BY. A median is usually a
+  better summary of wait time than AVG.
+
+Choosing a table. Use runTBL2 for recent counts and outcomes; it is current
+to within hours but carries no timing columns. Use a fiscal year table for
+anything about wait or run time, and for historical analysis inside its
+range: FY2026 covers 2025-07-01 to 2026-07-13, earlier years likewise.
+nodemetrics stopped in 2022 and should not be used. Querying a table outside
+its range returns nothing, which is not the same as nothing having happened.
+
+Always bound a query with a WHERE clause on time, and aggregate in SQL rather
+than listing rows when the question is about counts.
+
+Worked examples, taken from queries this site actually runs:
+
+  -- jobs per day for named users over a window
+  SELECT DATE(FROM_UNIXTIME(SubmitTime)) AS day, netid, COUNT(*) AS jobs
+  FROM FY2026
+  WHERE netid IN ('gunan','hansu')
+    AND SubmitTime >= UNIX_TIMESTAMP('2026-05-09')
+    AND SubmitTime <  UNIX_TIMESTAMP('2026-06-01')
+  GROUP BY day, netid ORDER BY day, netid;
+
+  -- median wait time per user; note DISTINCT and OVER, not GROUP BY
+  SELECT DISTINCT netid,
+         ROUND(MEDIAN(WaitTime) OVER (PARTITION BY netid)/3600,1) AS p50_wait_hr
+  FROM FY2026
+  WHERE netid IN ('gunan','hansu')
+    AND SubmitTime >= UNIX_TIMESTAMP('2026-05-09')
+    AND StartTime > 0 AND State <> 'CANCELLED';
+
+  -- mean wait by user and job width, an ordinary aggregate
+  SELECT netid, NCPUS, COUNT(*) AS jobs,
+         ROUND(AVG(WaitTime)/3600,1) AS avg_wait_hr
+  FROM FY2026
+  WHERE NCPUS IN (40,80)
+    AND SubmitTime >= UNIX_TIMESTAMP('2026-05-09')
+    AND StartTime > 0 AND State <> 'CANCELLED'
+  GROUP BY netid, NCPUS;
+
+  -- requested versus actual on one partition
+  SELECT ` + "`" + `partition` + "`" + `, WaitTime, Timelimit*60 AS RequestedSeconds, NNodes, NCPUS
+  FROM FY2026
+  WHERE ` + "`" + `partition` + "`" + ` = 'cpu'
+    AND SubmitTime >= UNIX_TIMESTAMP('2026-05-09')
+    AND StartTime > 0 AND WaitTime >= 0 AND State <> 'CANCELLED';
 
 When you answer from database.query, state the SQL you ran. The reader cannot
 check a number whose derivation is invisible, and a query that runs without
