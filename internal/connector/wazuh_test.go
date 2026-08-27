@@ -1,0 +1,230 @@
+package connector
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+
+	"github.com/maclach/sroiaaa/internal/broker"
+)
+
+func TestWazuhConnectorAuthenticatesThenListsAgents(t *testing.T) {
+	var authCalls, agentCalls int32
+	var capturedQuery string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/security/user/authenticate"):
+			atomic.AddInt32(&authCalls, 1)
+			user, pass, ok := r.BasicAuth()
+			if !ok || user != "rts_wazuh_api_ro" || pass != "secret" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			io.WriteString(w, "jwt-token-value\n")
+		case r.URL.Path == "/agents":
+			atomic.AddInt32(&agentCalls, 1)
+			if got := r.Header.Get("Authorization"); got != "Bearer jwt-token-value" {
+				t.Errorf("Authorization = %q", got)
+			}
+			capturedQuery = r.URL.RawQuery
+			io.WriteString(w, `{"data":{"affected_items":[
+				{"id":"000","name":"manager","ip":"127.0.0.1","status":"active","version":"Wazuh v4.14.0"},
+				{"id":"001","name":"node02","ip":"10.0.0.2","status":"disconnected","version":"Wazuh v4.14.0","lastKeepAlive":"2026-08-27T00:00:00Z"}
+			],"total_affected_items":275,"total_failed_items":0},"message":"ok","error":0}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	connector := newTestWazuh(t, server.URL)
+	evidence, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceWazuhAPI,
+		Action: "agents.list",
+		Limit:  500,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if evidence.ItemCount != 2 {
+		t.Fatalf("ItemCount = %d, want 2", evidence.ItemCount)
+	}
+	if evidence.TotalAvailable != 275 {
+		t.Errorf("TotalAvailable = %d, want 275", evidence.TotalAvailable)
+	}
+	if !evidence.Truncated {
+		t.Error("Truncated should be true when the fleet exceeds the returned page")
+	}
+	if evidence.Items[1].State != "disconnected" {
+		t.Errorf("state = %q", evidence.Items[1].State)
+	}
+	if evidence.Items[1].Fields["ip"] != "10.0.0.2" {
+		t.Errorf("ip field = %q", evidence.Items[1].Fields["ip"])
+	}
+	if !strings.Contains(capturedQuery, "limit=500") {
+		t.Errorf("query = %q, want the plan limit applied", capturedQuery)
+	}
+
+	// A second call must reuse the cached token rather than re-authenticating.
+	if _, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceWazuhAPI,
+		Action: "agents.list",
+	}); err != nil {
+		t.Fatalf("second Execute() error = %v", err)
+	}
+	if got := atomic.LoadInt32(&authCalls); got != 1 {
+		t.Errorf("authCalls = %d, want 1 (token should be cached)", got)
+	}
+	if got := atomic.LoadInt32(&agentCalls); got != 2 {
+		t.Errorf("agentCalls = %d, want 2", got)
+	}
+}
+
+func TestWazuhConnectorFiltersByHostForAgentStatus(t *testing.T) {
+	var capturedQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/security/user/authenticate") {
+			io.WriteString(w, "jwt-token-value")
+			return
+		}
+		capturedQuery = r.URL.RawQuery
+		io.WriteString(w, `{"data":{"affected_items":[{"id":"001","name":"node02","ip":"10.0.0.2","status":"disconnected"}],"total_affected_items":1},"error":0}`)
+	}))
+	defer server.Close()
+
+	connector := newTestWazuh(t, server.URL)
+	evidence, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceWazuhAPI,
+		Action: "agents.status",
+		Host:   "node02",
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(capturedQuery, "name=node02") {
+		t.Errorf("query = %q, want a name filter", capturedQuery)
+	}
+	if evidence.Truncated {
+		t.Error("a complete single-host result should not be marked truncated")
+	}
+}
+
+func TestWazuhConnectorRequiresHostForAgentStatus(t *testing.T) {
+	connector := newTestWazuh(t, "https://wazuh.example.edu:55000")
+	_, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceWazuhAPI,
+		Action: "agents.status",
+	})
+	if err == nil {
+		t.Fatal("expected agents.status without a host to be rejected")
+	}
+}
+
+func TestWazuhConnectorRejectsUnplannedAction(t *testing.T) {
+	connector := newTestWazuh(t, "https://wazuh.example.edu:55000")
+	_, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceWazuhAPI,
+		Action: "agents.delete",
+	})
+	var connErr *ConnectorError
+	if err == nil || !asConnectorError(err, &connErr) || connErr.Code != "unsupported_action" {
+		t.Fatalf("error = %v, want unsupported_action", err)
+	}
+}
+
+func TestWazuhConnectorSurfacesAPIError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/security/user/authenticate") {
+			io.WriteString(w, "jwt-token-value")
+			return
+		}
+		io.WriteString(w, `{"data":{"affected_items":[],"total_affected_items":0},"message":"Permission denied","error":4000}`)
+	}))
+	defer server.Close()
+
+	connector := newTestWazuh(t, server.URL)
+	_, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceWazuhAPI,
+		Action: "agents.list",
+	})
+	if err == nil || !strings.Contains(err.Error(), "Permission denied") {
+		t.Fatalf("error = %v, want the API message preserved", err)
+	}
+}
+
+func TestWazuhConnectorFailsClosedOnBadCredentials(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	connector := newTestWazuh(t, server.URL)
+	_, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceWazuhAPI,
+		Action: "agents.list",
+	})
+	var connErr *ConnectorError
+	if err == nil || !asConnectorError(err, &connErr) || connErr.Code != "authentication_failed" {
+		t.Fatalf("error = %v, want authentication_failed", err)
+	}
+}
+
+func TestWazuhConnectorRequiresConfiguration(t *testing.T) {
+	tests := []struct {
+		name   string
+		config WazuhConfig
+	}{
+		{"missing endpoint", WazuhConfig{Username: "u", Password: "p"}},
+		{"missing username", WazuhConfig{Endpoint: "https://w.example.edu:55000", Password: "p"}},
+		{"missing password", WazuhConfig{Endpoint: "https://w.example.edu:55000", Username: "u"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := NewWazuhConnector(test.config); err == nil {
+				t.Fatal("expected configuration to be rejected")
+			}
+		})
+	}
+}
+
+func newTestWazuh(t *testing.T, endpoint string) *WazuhConnector {
+	t.Helper()
+	connector, err := NewWazuhConnector(WazuhConfig{
+		Endpoint: endpoint,
+		Username: "rts_wazuh_api_ro",
+		Password: "secret",
+	})
+	if err != nil {
+		t.Fatalf("NewWazuhConnector() error = %v", err)
+	}
+	return connector
+}
+
+func TestWazuhSummaryExcludesManagerAndMatchesDashboard(t *testing.T) {
+	// The manager's own record (id 000) appears in GET /agents but not in the
+	// manager's summary endpoint. Counting it would put our numbers one above
+	// what the Wazuh dashboard shows.
+	agents := []wazuhAgent{
+		{ID: "000", Name: "manager", Status: "active"},
+		{ID: "001", Name: "node01", Status: "active"},
+		{ID: "002", Name: "node02", Status: "disconnected"},
+		{ID: "003", Name: "node03", Status: "disconnected"},
+	}
+	summary := summarizeAgents(agents)
+
+	if summary["total"] != 3 {
+		t.Errorf("total = %d, want 3 (manager excluded)", summary["total"])
+	}
+	if summary["active"] != 1 {
+		t.Errorf("active = %d, want 1 (manager excluded)", summary["active"])
+	}
+	if summary["disconnected"] != 2 {
+		t.Errorf("disconnected = %d, want 2", summary["disconnected"])
+	}
+}
