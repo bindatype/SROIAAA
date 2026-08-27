@@ -4,4 +4,5 @@ dist/
 .gocache/
 .gomodcache/
 *.log
+!testdata/varlog/system.log
 *.out

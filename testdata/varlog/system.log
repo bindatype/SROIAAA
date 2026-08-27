@@ -1,0 +1,3 @@
+2026-08-25T12:00:00Z INFO kernel: boot sequence started
+2026-08-25T12:00:01Z WARN slurmctld: transient rpc retry
+2026-08-25T12:00:02Z ERROR scheduler: job 481516 failed to stage input
