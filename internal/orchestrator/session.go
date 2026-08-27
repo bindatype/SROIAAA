@@ -32,8 +32,9 @@ Intents, and what each can and cannot answer:
   monitoring.problems  active Zabbix problem triggers. Host optional and narrows the result.
   live.evidence        a policy-approved file from a SROIAAA endpoint. Requires host and resource.
   database.query       a read-only SQL query against the pegasusdb HPC accounting
-                       database. Requires query. Use this for jobs, scheduler
-                       outcomes, and storage usage.
+                       database. Put the SQL in the "query" field, never in
+                       "resource". Use this for jobs, scheduler outcomes, and
+                       storage usage.
 
 These intents are the ONLY evidence available to you. Nothing here reports
 vulnerabilities or CVEs, installed packages or patch level, log contents,
@@ -89,6 +90,11 @@ its range returns nothing, which is not the same as nothing having happened.
 
 Always bound a query with a WHERE clause on time, and aggregate in SQL rather
 than listing rows when the question is about counts.
+
+A relative window such as "the last 7 days" is ambiguous. NOW() - INTERVAL 7
+DAY and CURDATE() - INTERVAL 7 DAY select different sets, and here they differ
+by several hundred jobs. Use NOW() for a rolling window, and say which window
+you used so a reader can tell what was counted.
 
 Results are capped at a small number of rows. If the evidence summary contains
 result_was_capped, you were given an arbitrary slice of a larger result and you
@@ -184,7 +190,11 @@ func ToolDefinition(intents []string) any {
 					},
 					"resource": map[string]any{
 						"type":        "string",
-						"description": "Policy-defined resource alias. Required for live.evidence.",
+						"description": "Policy-defined resource alias. For live.evidence ONLY. Never put SQL here.",
+					},
+					"query": map[string]any{
+						"type":        "string",
+						"description": "The SQL for database.query, and the only field SQL may go in. One read-only SELECT, bounded by WHERE.",
 					},
 				},
 				"required":             []string{"intent"},

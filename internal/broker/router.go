@@ -79,7 +79,11 @@ func (r *Router) Plan(request RouteRequest) (RoutePlan, error) {
 
 	case IntentDatabaseQuery:
 		if request.Host != "" || request.Resource != "" {
-			return RoutePlan{}, newRouteError("invalid_request", "database.query does not accept host or resource")
+			// Naming the correct field matters: a caller told only what is wrong
+			// has to guess, and a model given this error repeated the same
+			// mistake on retry.
+			return RoutePlan{}, newRouteError("invalid_request",
+				"database.query takes the SQL in the \"query\" field; it does not accept \"host\" or \"resource\"")
 		}
 		if err := ValidateQuery(request.Query); err != nil {
 			return RoutePlan{}, newRouteError("invalid_query", err.Error())
