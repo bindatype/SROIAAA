@@ -98,6 +98,12 @@ func ToolDefinition(intents []string) any {
 						"type":        "string",
 						"description": "The SQL for database.query, and the only field SQL may go in. One read-only SELECT, bounded by WHERE.",
 					},
+					"since": map[string]any{
+						"type": "string",
+						"description": "Bound evidence to what changed after this moment. RFC 3339, a date such as 2026-08-28, " +
+							"or a window such as 24h or 7d. Use it for any question about a time period. " +
+							"Not for database.query, which bounds time in its WHERE clause.",
+					},
 				},
 				"required":             []string{"intent"},
 				"additionalProperties": false,
@@ -398,7 +404,7 @@ func isRetryableRouteError(err error) bool {
 		return false
 	}
 	switch routeErr.Code {
-	case "invalid_request", "invalid_query", "invalid_host", "invalid_resource",
+	case "invalid_request", "invalid_query", "invalid_since", "invalid_host", "invalid_resource",
 		"missing_host", "missing_resource", "unknown_intent":
 		return true
 	default:

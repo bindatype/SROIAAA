@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 )
 
 const (
@@ -40,6 +41,18 @@ func NewRouter(policy Policy) (*Router, error) {
 }
 
 func (r *Router) Plan(request RouteRequest) (RoutePlan, error) {
+	// Normalized once here rather than in each connector, so every source
+	// receives the same instant and a malformed bound is refused at planning
+	// time instead of being interpreted differently by each API.
+	since, err := ParseSince(request.Since, time.Now())
+	if err != nil {
+		return RoutePlan{}, newRouteError("invalid_since", err.Error())
+	}
+	sinceValue := ""
+	if !since.IsZero() {
+		sinceValue = since.Format(time.RFC3339)
+	}
+
 	switch request.Intent {
 	case IntentFleetInventory:
 		if request.Host != "" || request.Resource != "" {
@@ -49,6 +62,7 @@ func (r *Router) Plan(request RouteRequest) (RoutePlan, error) {
 			Source: SourceWazuhAPI,
 			Action: "agents.list",
 			Limit:  fleetInventoryLimit,
+			Since:  sinceValue,
 		}), nil
 
 	case IntentAgentStatus:
@@ -59,6 +73,7 @@ func (r *Router) Plan(request RouteRequest) (RoutePlan, error) {
 			Source: SourceWazuhAPI,
 			Action: "agents.status",
 			Host:   request.Host,
+			Since:  sinceValue,
 		}), nil
 
 	case IntentMonitoringProblems:
@@ -75,6 +90,7 @@ func (r *Router) Plan(request RouteRequest) (RoutePlan, error) {
 			Action: "trigger.get",
 			Host:   request.Host,
 			Limit:  monitoringIssueLimit,
+			Since:  sinceValue,
 		}), nil
 
 	case IntentDatabaseQuery:
@@ -84,6 +100,10 @@ func (r *Router) Plan(request RouteRequest) (RoutePlan, error) {
 			// mistake on retry.
 			return RoutePlan{}, newRouteError("invalid_request",
 				"database.query takes the SQL in the \"query\" field; it does not accept \"host\" or \"resource\"")
+		}
+		if request.Since != "" {
+			return RoutePlan{}, newRouteError("invalid_request",
+				"database.query bounds time in the SQL WHERE clause; it does not take since")
 		}
 		if err := ValidateQuery(request.Query); err != nil {
 			return RoutePlan{}, newRouteError("invalid_query", err.Error())
@@ -208,10 +228,10 @@ func (r *Router) candidateRequests(plan RoutePlan) []RouteRequest {
 
 	switch plan.Intent {
 	case IntentFleetInventory:
-		return []RouteRequest{{Intent: plan.Intent}}
+		return []RouteRequest{{Intent: plan.Intent, Since: plan.Steps[0].Since}}
 
 	case IntentAgentStatus, IntentMonitoringProblems:
-		return []RouteRequest{{Intent: plan.Intent, Host: host}}
+		return []RouteRequest{{Intent: plan.Intent, Host: host, Since: plan.Steps[0].Since}}
 
 	case IntentDatabaseQuery:
 		// The query is carried verbatim in the plan rather than resolved from

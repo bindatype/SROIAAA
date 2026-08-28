@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRouterPlansCentralDataSources(t *testing.T) {
@@ -299,5 +300,80 @@ func TestSourceForIntentCoversEveryIntent(t *testing.T) {
 	}
 	if _, ok := SourceForIntent(Intent("nope")); ok {
 		t.Error("SourceForIntent accepted an unknown intent")
+	}
+}
+
+func TestParseSinceAcceptsTheFormsAModelReachesFor(t *testing.T) {
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		value string
+		want  time.Time
+	}{
+		{"2026-08-27T00:00:00Z", time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)},
+		{"2026-08-27", time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)},
+		{"24h", time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)},
+		{"7d", time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)},
+		// A model asked "did anything alert today" wrote since: "today". A
+		// parser that rejects the obvious word denies a well-formed question
+		// over vocabulary.
+		{"today", time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)},
+		{"yesterday", time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)},
+		{"", time.Time{}},
+	} {
+		got, err := ParseSince(test.value, now)
+		if err != nil {
+			t.Errorf("ParseSince(%q) error = %v", test.value, err)
+			continue
+		}
+		if !got.Equal(test.want) {
+			t.Errorf("ParseSince(%q) = %v, want %v", test.value, got, test.want)
+		}
+	}
+}
+
+func TestParseSinceRejectsUnboundedOrImpossibleWindows(t *testing.T) {
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	for _, value := range []string{
+		"2027-01-01",   // future
+		"3000d",        // further back than the bound
+		"-24h",         // not a past window
+		"last tuesday", // not a form we accept
+		"soon",         // not a time at all
+	} {
+		if _, err := ParseSince(value, now); err == nil {
+			t.Errorf("ParseSince(%q) was accepted", value)
+		}
+	}
+}
+
+func TestSinceReachesThePlanAndSurvivesVerification(t *testing.T) {
+	router := newTestRouter(t)
+	plan, err := router.Plan(RouteRequest{Intent: IntentMonitoringProblems, Since: "24h"})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if plan.Steps[0].Since == "" {
+		t.Fatal("since did not reach the step")
+	}
+	if _, err := time.Parse(time.RFC3339, plan.Steps[0].Since); err != nil {
+		t.Errorf("since should be normalized to RFC 3339, got %q", plan.Steps[0].Since)
+	}
+	// A relative window becomes an absolute instant during planning, so
+	// verification has to reconstruct from the absolute form.
+	if err := router.Verify(plan); err != nil {
+		t.Errorf("Verify() rejected a plan carrying since: %v", err)
+	}
+}
+
+func TestDatabaseQueryRefusesSince(t *testing.T) {
+	// SQL bounds its own time. Two mechanisms would disagree silently.
+	router := newTestRouter(t)
+	_, err := router.Plan(RouteRequest{
+		Intent: IntentDatabaseQuery,
+		Query:  "SELECT 1 FROM runTBL2 WHERE SubmitTime > 0",
+		Since:  "24h",
+	})
+	if err == nil {
+		t.Fatal("database.query should refuse since")
 	}
 }

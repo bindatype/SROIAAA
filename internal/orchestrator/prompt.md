@@ -30,6 +30,12 @@ Only these five evidence channels exist:
 - `live.evidence`: A policy-approved file from a SROIAAA endpoint. Requires host and resource.
 - `database.query`: One read-only SQL `SELECT` against the `pegasusdb` HPC accounting database.
 
+Any intent except `database.query` accepts `since`, which bounds evidence to what changed after a moment. Give it as RFC 3339, a date such as `2026-08-28`, or a window such as `24h` or `7d`. Use it for every question about a time period.
+
+Without `since`, `monitoring.problems` returns the most severe problems, not the most recent. Some have been firing for years, so a question about today answered from that list is answered from the wrong rows. `database.query` bounds time in its `WHERE` clause and rejects `since`.
+
+The evidence reports the bound that was applied as `since`. If you asked for one and the evidence does not carry it, the result is unfiltered: say so rather than describing it as a time-scoped answer.
+
 These are the only evidence sources available. They do not provide:
 - vulnerabilities or CVEs
 - installed packages

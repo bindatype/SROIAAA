@@ -21,7 +21,12 @@ type Evidence struct {
 	// model composed. Without it an answer is unauditable by the person
 	// reading it: the number looks authoritative and its derivation is
 	// invisible.
-	Query       string    `json:"query,omitempty"`
+	Query string `json:"query,omitempty"`
+	// Since is the time bound this source actually applied. A request that
+	// asked for one and gets evidence back without it has been answered from
+	// unfiltered data, which for a time-scoped question is wrong in the
+	// direction that reads as right.
+	Since       string    `json:"since,omitempty"`
 	RequestedAt time.Time `json:"requested_at"`
 	DurationMS  int64     `json:"duration_ms"`
 	ItemCount   int       `json:"item_count"`

@@ -57,6 +57,13 @@ type RouteRequest struct {
 	// single-schema read grant bounds the damage class in a way that no
 	// filesystem path could.
 	Query string `json:"query,omitempty"`
+	// Since bounds evidence to what changed after a moment, as RFC 3339. It is
+	// a property of a request rather than of any one source: each connector
+	// maps it to its own idiom. A connector that cannot honour it must say so
+	// in the evidence rather than return unfiltered rows, because a time-scoped
+	// question answered from unfiltered data is wrong in the direction that
+	// looks right.
+	Since string `json:"since,omitempty"`
 }
 
 type RoutePlan struct {
@@ -72,6 +79,7 @@ type RouteStep struct {
 	Limit     int              `json:"limit,omitempty"`
 	Operation string           `json:"operation,omitempty"`
 	Query     string           `json:"query,omitempty"`
+	Since     string           `json:"since,omitempty"`
 	Target    *OperationTarget `json:"target,omitempty"`
 	Params    *OperationParams `json:"params,omitempty"`
 }

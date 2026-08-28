@@ -116,6 +116,17 @@ func (c *ZabbixConnector) Execute(ctx context.Context, step broker.RouteStep) (E
 	if step.Host != "" {
 		params["host"] = step.Host
 	}
+	if step.Since != "" {
+		moment, err := time.Parse(time.RFC3339, step.Since)
+		if err != nil {
+			return Evidence{}, newConnectorError("invalid_since", err.Error())
+		}
+		params["lastChangeSince"] = moment.Unix()
+		// Severity order is wrong for a question about recency: the most severe
+		// problems here have been firing since 2024, so the top of that list
+		// contains nothing from today.
+		params["sortfield"] = "lastchange"
+	}
 
 	requestedAt := time.Now().UTC()
 	result, _, err := c.call(ctx, method, params)
@@ -153,6 +164,7 @@ func (c *ZabbixConnector) Execute(ctx context.Context, step broker.RouteStep) (E
 		Source:         string(broker.SourceZabbixAPI),
 		Action:         step.Action,
 		Endpoint:       redactEndpoint(c.endpoint),
+		Since:          step.Since,
 		RequestedAt:    requestedAt,
 		DurationMS:     time.Since(requestedAt).Milliseconds(),
 		ItemCount:      len(items),

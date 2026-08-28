@@ -139,6 +139,14 @@ func (c *WazuhConnector) Execute(ctx context.Context, step broker.RouteStep) (Ev
 		query.Set("name", step.Host)
 	}
 
+	if step.Since != "" {
+		moment, err := time.Parse(time.RFC3339, step.Since)
+		if err != nil {
+			return Evidence{}, newConnectorError("invalid_since", err.Error())
+		}
+		query.Set("q", "lastKeepAlive>"+moment.Format("2006-01-02T15:04:05Z"))
+	}
+
 	requestedAt := time.Now().UTC()
 	payload, err := c.get(ctx, "/agents", query)
 	if err != nil {
@@ -150,6 +158,7 @@ func (c *WazuhConnector) Execute(ctx context.Context, step broker.RouteStep) (Ev
 		Source:         string(broker.SourceWazuhAPI),
 		Action:         step.Action,
 		Endpoint:       redactEndpoint(c.endpoint),
+		Since:          step.Since,
 		RequestedAt:    requestedAt,
 		DurationMS:     time.Since(requestedAt).Milliseconds(),
 		ItemCount:      len(items),
