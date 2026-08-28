@@ -22,7 +22,12 @@ const (
 	// SROIAAA_PEGASUS_MAX_ROWS overrides it.
 	pegasusDefaultMaxRows = 500
 	pegasusMaxCellBytes   = 4096
-	pegasusMaxTotalBytes  = 512 * 1024
+	// Sized against the model context rather than against the database. Every
+	// model here is capped at 32k tokens, roughly 128 KB, and the evidence has
+	// to leave room for the prompt, the question and an answer. A connector
+	// that returns more than the orchestrator will accept produces a query
+	// that succeeds and then fails.
+	pegasusMaxTotalBytes = 48 * 1024
 )
 
 // PegasusConfig carries operator-supplied connection details.

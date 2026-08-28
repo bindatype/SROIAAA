@@ -1,0 +1,94 @@
+package orchestrator
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/maclach/sroiaaa/internal/broker"
+)
+
+// The prompt is English the compiler cannot check, but parts of it are load
+// bearing: it names the tool, it enumerates the intents, and several of its
+// claims exist because getting them wrong produced a confidently wrong answer.
+// These assert the couplings that would otherwise drift silently.
+
+func TestPromptNamesTheTool(t *testing.T) {
+	if !strings.Contains(systemPrompt, toolName) {
+		t.Errorf("prompt does not mention %q; a renamed tool would leave the model calling one that does not exist", toolName)
+	}
+}
+
+func TestPromptDescribesEveryIntent(t *testing.T) {
+	for _, intent := range broker.AllIntents() {
+		if !strings.Contains(systemPrompt, string(intent)) {
+			t.Errorf("prompt does not describe intent %q; a model offered an intent it was never told about has to guess its arguments", intent)
+		}
+	}
+}
+
+func TestPromptDescribesEveryToolParameter(t *testing.T) {
+	// A field absent from the prompt is a field the model infers the name of.
+	// database.query was usable only by accident until "query" was declared.
+	definition := ToolDefinition([]string{"database.query"}).(map[string]any)
+	function := definition["function"].(map[string]any)
+	parameters := function["parameters"].(map[string]any)
+	properties := parameters["properties"].(map[string]any)
+
+	for name := range properties {
+		if !strings.Contains(systemPrompt, name) {
+			t.Errorf("tool parameter %q is never mentioned in the prompt", name)
+		}
+	}
+}
+
+func TestPromptRetainsItsHardWonRules(t *testing.T) {
+	// Each of these is in the prompt because its absence produced a specific
+	// wrong answer. Removing one should require deleting a test and saying why.
+	rules := []struct {
+		needle string
+		why    string
+	}{
+		{"State is the authoritative job outcome",
+			"using DerivedExitCode reported 26 failures against a true 496"},
+		{"UNIX_TIMESTAMP(NOW()",
+			"comparing an integer column to a datetime silently matched zero rows"},
+		{"total_matching",
+			"without comparing it to returned, a truncated result reads as complete"},
+		{"Absence of evidence is not evidence of absence",
+			"an empty Zabbix result was reported as 'no critical CVEs'"},
+		{"information_schema",
+			"the prompt previously implied its own table list was exhaustive"},
+		{"does not collapse rows",
+			"an uncollapsed window function filled the result with duplicates"},
+	}
+	for _, rule := range rules {
+		if !strings.Contains(systemPrompt, rule.needle) {
+			t.Errorf("prompt lost %q\n     it was there because: %s", rule.needle, rule.why)
+		}
+	}
+}
+
+func TestPromptAndEvidenceLeaveRoomToAnswer(t *testing.T) {
+	// Every model on this gateway is capped at 32k tokens regardless of its
+	// native context, which is roughly 128 KB. The prompt and a maximal
+	// evidence payload both travel on the synthesis turn, so together they must
+	// leave room for the question, the tool call and an answer of useful
+	// length. Three quarters is the line.
+	const window = 32000 * 4
+	used := len(systemPrompt) + maxEvidenceJSON
+	if used > window*3/4 {
+		t.Errorf("prompt (%d) plus max evidence (%d) is %d of a %d byte window, leaving %d for the answer",
+			len(systemPrompt), maxEvidenceJSON, used, window, window-used)
+	}
+}
+
+func TestEvidenceBudgetExceedsWhatConnectorsReturn(t *testing.T) {
+	// A connector allowed to return more than this will produce a query that
+	// succeeds against the database and is then rejected here, which reads to
+	// the caller as a failure of the query rather than of the configuration.
+	const largestConnectorPayload = 48 * 1024 // pegasusMaxTotalBytes
+	if maxEvidenceJSON <= largestConnectorPayload {
+		t.Errorf("evidence budget %d does not exceed the largest connector payload %d",
+			maxEvidenceJSON, largestConnectorPayload)
+	}
+}
