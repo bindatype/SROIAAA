@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,7 +23,8 @@ var systemPrompt string
 const (
 	toolName = "sroiaaa_evidence"
 	// Headroom above what any connector will return, so evidence is rejected
-	// here only if a connector's own bound has failed.
+	// here only if a connector's own bound has failed. SROIAAA_MAX_EVIDENCE
+	// raises it in step with a raised connector cap.
 	maxEvidenceJSON = 64 * 1024
 
 	// maxToolCalls bounds the work, not the authority: each call is validated
@@ -238,7 +240,7 @@ func (s *Session) Ask(ctx context.Context, question string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("encode evidence: %w", err)
 		}
-		if len(evidenceJSON) > maxEvidenceJSON {
+		if len(evidenceJSON) > evidenceBudget() {
 			messages = append(messages, Message{
 				Role: "tool", ToolCallID: call.ID, Name: toolName,
 				Content: `{"error":"the result was too large to return; narrow it or aggregate in SQL"}`,
@@ -287,6 +289,13 @@ func (s *Session) runOneCall(ctx context.Context, call ToolCall) (connector.Resu
 	plan, err := s.router.Plan(request)
 	if err != nil {
 		s.record("policy_denied", err.Error(), false)
+		// Record the denial even when the model will be allowed another
+		// attempt. A request denied and then retried is not the same as one
+		// that never proposed anything, and "no_tool_call" says the wrong
+		// thing about a model that proposed an intent that does not exist.
+		if s.event.Decision == "no_tool_call" {
+			s.event.Decision = "denied"
+		}
 		// Being told a host is not authorized is an answer. Putting a value in
 		// the wrong field is a mistake. Only the second earns another attempt.
 		return connector.Result{}, &callFailure{
@@ -391,4 +400,16 @@ func describesACallInstead(answer string) bool {
 		strings.Contains(lowered, "execute this via the tool")
 
 	return mentionsTheCall || announces
+}
+
+// evidenceBudget is the largest evidence payload this session will hand a
+// model. It tracks the connector caps: raising one without the other produces
+// a query that succeeds and is then refused.
+func evidenceBudget() int {
+	if value := os.Getenv("SROIAAA_MAX_EVIDENCE"); value != "" {
+		if size, err := strconv.Atoi(value); err == nil && size > 0 {
+			return size
+		}
+	}
+	return maxEvidenceJSON
 }

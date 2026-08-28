@@ -27,6 +27,9 @@ const (
 	// to leave room for the prompt, the question and an answer. A connector
 	// that returns more than the orchestrator will accept produces a query
 	// that succeeds and then fails.
+	// Sized for a 32k context, which is what most models here are clamped to.
+	// SROIAAA_PEGASUS_MAX_BYTES raises it for a model with a larger window;
+	// raising it globally would overflow the models that do not have one.
 	pegasusMaxTotalBytes = 48 * 1024
 )
 

@@ -15,13 +15,14 @@ import (
 )
 
 const (
-	zabbixEndpointEnv = "SROIAAA_ZABBIX_ENDPOINT"
-	zabbixTokenEnv    = "ZABBIX_RO_TOKEN"
-	wazuhEndpointEnv  = "SROIAAA_WAZUH_ENDPOINT"
-	wazuhUsernameEnv  = "WAZUH_API_USERNAME"
-	wazuhPasswordEnv  = "WAZUH_API_PASSWORD"
-	pegasusDSNEnv     = "SROIAAA_PEGASUS_DSN"
-	pegasusMaxRowsEnv = "SROIAAA_PEGASUS_MAX_ROWS"
+	zabbixEndpointEnv  = "SROIAAA_ZABBIX_ENDPOINT"
+	zabbixTokenEnv     = "ZABBIX_RO_TOKEN"
+	wazuhEndpointEnv   = "SROIAAA_WAZUH_ENDPOINT"
+	wazuhUsernameEnv   = "WAZUH_API_USERNAME"
+	wazuhPasswordEnv   = "WAZUH_API_PASSWORD"
+	pegasusDSNEnv      = "SROIAAA_PEGASUS_DSN"
+	pegasusMaxRowsEnv  = "SROIAAA_PEGASUS_MAX_ROWS"
+	pegasusMaxBytesEnv = "SROIAAA_PEGASUS_MAX_BYTES"
 )
 
 func main() {
@@ -201,7 +202,7 @@ func buildConnectors(plan broker.RoutePlan, options connectorOptions) ([]connect
 		if dsn == "" {
 			return nil, fmt.Errorf("plan needs the accounting database: %s must be set and exported", pegasusDSNEnv)
 		}
-		pegasus, err := connector.NewPegasusConnector(connector.PegasusConfig{DSN: dsn, MaxRows: pegasusMaxRows()})
+		pegasus, err := connector.NewPegasusConnector(connector.PegasusConfig{DSN: dsn, MaxRows: pegasusMaxRows(), MaxBytes: pegasusMaxBytes()})
 		if err != nil {
 			return nil, err
 		}
@@ -230,4 +231,19 @@ func pegasusMaxRows() int {
 		return 0
 	}
 	return rows
+}
+
+// pegasusMaxBytes reads the evidence byte-cap override, falling back to the
+// connector default when unset. Raise it only alongside a model whose context
+// window can hold the result.
+func pegasusMaxBytes() int {
+	value := os.Getenv(pegasusMaxBytesEnv)
+	if value == "" {
+		return 0
+	}
+	size, err := strconv.Atoi(value)
+	if err != nil || size <= 0 {
+		return 0
+	}
+	return size
 }

@@ -75,6 +75,8 @@ func TestPromptAndEvidenceLeaveRoomToAnswer(t *testing.T) {
 	// leave room for the question, the tool call and an answer of useful
 	// length. Three quarters is the line.
 	const window = 32000 * 4
+	// The compiled defaults, not the environment override: this asserts that
+	// the shipped configuration is safe for the models actually in use.
 	used := len(systemPrompt) + maxEvidenceJSON
 	if used > window*3/4 {
 		t.Errorf("prompt (%d) plus max evidence (%d) is %d of a %d byte window, leaving %d for the answer",
