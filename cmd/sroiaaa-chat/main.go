@@ -28,11 +28,19 @@ const (
 	pegasusMaxBytesEnv    = "SROIAAA_PEGASUS_MAX_BYTES"
 	auditPathEnv          = "SROIAAA_BROKER_AUDIT"
 
-	// defaultModel: qwen3.6:35b won the first survey, which graded intent
-	// routing on questions needing one call. Measured later the same day on SQL
-	// composition, which that survey did not cover, llama3.3 answered correctly
-	// eight times out of eight against five. Override with -model.
-	defaultModel = "llama3.3:latest"
+	// defaultModel is chosen by scripts/eval_headtohead.py, which grades six
+	// question shapes rather than one: an aggregate, a grouped result that
+	// engages the row cap, a two-step schema lookup, a question with no data
+	// source that must be refused, a concept with no matching column that must
+	// be derived rather than refused, and a listing that exceeds the cap.
+	//
+	// On 2026-08-28, gemma4:31b scored 30/30 at 9.8s per question against
+	// llama3.3's 28/30 at 15.2s. Earlier single-question comparisons could not
+	// separate them; the concept case did.
+	//
+	// Do not change this without rerunning that suite. Override per call with
+	// -model.
+	defaultModel = "gemma4:31b"
 )
 
 func main() {

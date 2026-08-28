@@ -89,6 +89,30 @@ This runs real questions against live monitoring data and grades the
 answers. If it passes, your environment is correct and you have a working
 baseline to compare against after you change something.
 
+## Which model to use
+
+The default is **`gemma4:31b`**, set on 2026-08-28 and not to be changed
+without rerunning the comparison that chose it. It is compiled into
+`cmd/sroiaaa-chat` and overridable per call with `-model`, which is the right
+way to try another one.
+
+```bash
+make eval-headtohead                                    # the current default pair
+python3 scripts/eval_headtohead.py gemma4:31b <other>   # against a challenger
+```
+
+That suite grades six question shapes with ground truth computed live: an
+aggregate, a grouped result that engages the row cap, a two-step schema
+lookup, a question with no data source that must be refused, a concept with no
+matching column that must be derived rather than refused, and a listing that
+exceeds the cap. On the day it was chosen, `gemma4:31b` scored 30/30 at 9.8s
+per question against `llama3.3:latest` at 28/30 and 15.2s.
+
+Earlier single-question comparisons could not separate those two, and one of
+them picked a different winner. If you are evaluating a model, use the suite
+rather than a question you like: a model can be perfect on an aggregate and
+still answer a different question than the one asked.
+
 ## Adding an API
 
 Read [adding-a-connector.md](adding-a-connector.md) first. It defines the

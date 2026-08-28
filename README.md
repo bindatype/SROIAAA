@@ -315,6 +315,10 @@ echo '{"intent":"monitoring.problems","host":"dss01"}' \
 Both halves take the policy. The planner uses it to authorize; the executor
 uses it to verify what it was given.
 
+The default model is `gemma4:31b`, chosen by `make eval-headtohead`. Override
+per call with `-model`; do not change the default without rerunning that
+suite.
+
 ### What it can and cannot answer
 
 Four intents, and nothing else:
