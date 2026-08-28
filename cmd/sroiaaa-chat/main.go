@@ -27,9 +27,11 @@ const (
 	pegasusMaxRowsEnv     = "SROIAAA_PEGASUS_MAX_ROWS"
 	auditPathEnv          = "SROIAAA_BROKER_AUDIT"
 
-	// defaultModel matched the larger models on routing and accuracy at a
-	// fraction of their latency in the 2026-08-27 model survey.
-	defaultModel = "qwen3.6:35b"
+	// defaultModel: qwen3.6:35b won the first survey, which graded intent
+	// routing on questions needing one call. Measured later the same day on SQL
+	// composition, which that survey did not cover, llama3.3 answered correctly
+	// eight times out of eight against five. Override with -model.
+	defaultModel = "llama3.3:latest"
 )
 
 func main() {

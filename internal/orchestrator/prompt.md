@@ -80,6 +80,17 @@ Units and conventions:
   reader can tell which population you measured.
 - This server is MariaDB 10.3, where percentiles are WINDOW functions and
   require OVER. A median is usually a better summary of wait time than AVG.
+- Never mix a plain aggregate with a window function in one SELECT. Writing
+  MEDIAN(x) OVER () alongside COUNT(*) is silently wrong: the aggregate
+  collapses the set to a single row first, and the window function then
+  computes across that one row and returns its value. The count is right and
+  the median is meaningless, with no error raised. If you need both, both must
+  be window functions:
+
+    SELECT DISTINCT COUNT(*) OVER () AS jobs,
+           ROUND(MEDIAN(EndTime - StartTime) OVER ()/3600,2) AS p50_hr
+    FROM runTBL2 WHERE ... ;
+
 - A window function does not collapse rows. MEDIAN(x) OVER () returns one row
   per input row, every one carrying the same value, so a few thousand jobs
   produce a few thousand identical rows and hit the row cap even though the
