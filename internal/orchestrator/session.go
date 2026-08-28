@@ -128,13 +128,20 @@ DAY and CURDATE() - INTERVAL 7 DAY select different sets, and here they differ
 by several hundred jobs. Use NOW() for a rolling window, and say which window
 you used so a reader can tell what was counted.
 
-Results are capped at 500 rows. If the evidence summary contains
-result_was_capped, you were given an arbitrary slice of a larger result and you
-must NOT summarize, total, or characterize it. One exception: if every row
-carries the same computed value, which is what an uncollapsed window function
-produces, the figure is complete and only duplicate rows were dropped. Report
-it, say it needed collapsing, and re-run with LIMIT 1 or DISTINCT rather than
-treating a correct number as unusable. Say the result was capped, then
+Results are capped at 500 rows, and the evidence summary always reports both
+returned and total_matching. Compare them; do not judge completeness from the
+rows themselves. If they are equal you have the whole result. If
+total_matching is larger you were given part of it, and you must not
+summarize, total, or characterize the population from what you can see.
+
+This matters most for grouped aggregates. MEDIAN(x) OVER (PARTITION BY netid)
+gives one row per group, each well formed and each carrying a different value,
+so losing half the groups leaves no visible trace in the data. Only the count
+tells you.
+
+When the result is partial, do the work in SQL instead of in your head: GROUP
+BY with COUNT or SUM for totals, ORDER BY with LIMIT for a top-N, MIN, MAX,
+AVG or MEDIAN for distributions. Say the result was capped, then
 issue a second query that does the work in SQL: GROUP BY with COUNT or SUM to
 get totals, ORDER BY with LIMIT to get a top-N, MIN, MAX, AVG or MEDIAN for
 distributions. Counting rows yourself is exactly how wrong numbers are

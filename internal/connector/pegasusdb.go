@@ -148,34 +148,60 @@ func (c *PegasusConnector) Execute(ctx context.Context, step broker.RouteStep) (
 		return Evidence{}, newConnectorError("query_failed", err.Error())
 	}
 
-	items, truncated, err := scanRows(rows, columns, rowLimit, c.maxBytes)
+	items, capped, err := scanRows(rows, columns, rowLimit, c.maxBytes)
+	if err != nil {
+		return Evidence{}, err
+	}
+	rows.Close()
+
+	// How many rows the query would have produced. Without this a truncated
+	// result is indistinguishable from a complete one, and the distinction
+	// cannot be recovered from the rows themselves: an aggregate grouped by
+	// user returns well-formed rows with different values, so half the groups
+	// going missing leaves no trace in the data. Asking the model to judge
+	// whether truncation mattered is asking it to guess.
+	total, err := c.countRows(ctx, conn, step.Query)
 	if err != nil {
 		return Evidence{}, err
 	}
 
 	summary := map[string]int{
-		"returned": len(items),
-		"columns":  len(columns),
+		"returned":       len(items),
+		"total_matching": total,
+		"columns":        len(columns),
 	}
+	truncated := capped || total > len(items)
 	if truncated {
-		// Named so that a reader of the evidence cannot mistake a capped result
-		// for a complete one.
 		summary["row_limit"] = rowLimit
-		summary["result_was_capped"] = 1
 	}
 
 	return Evidence{
-		Source:      string(broker.SourcePegasusDB),
-		Action:      step.Action,
-		Endpoint:    c.endpoint,
-		Query:       step.Query,
-		RequestedAt: requestedAt,
-		DurationMS:  time.Since(requestedAt).Milliseconds(),
-		ItemCount:   len(items),
-		Truncated:   truncated,
-		Summary:     summary,
-		Items:       items,
+		Source:         string(broker.SourcePegasusDB),
+		Action:         step.Action,
+		Endpoint:       c.endpoint,
+		Query:          step.Query,
+		RequestedAt:    requestedAt,
+		DurationMS:     time.Since(requestedAt).Milliseconds(),
+		ItemCount:      len(items),
+		TotalAvailable: total,
+		Truncated:      truncated,
+		Summary:        summary,
+		Items:          items,
 	}, nil
+}
+
+// countRows reports how many rows the query yields, by wrapping it. The cost
+// is a second execution, which is the same trade the Zabbix connector makes
+// for the same reason: a page that cannot be told apart from a whole answer is
+// worse than a slower one.
+func (c *PegasusConnector) countRows(ctx context.Context, conn *sql.Conn, query string) (int, error) {
+	wrapped := "SELECT COUNT(*) FROM (" + strings.TrimRight(strings.TrimSpace(query), "; \t\n\r") + ") AS sroiaaa_rowcount"
+
+	var total int
+	if err := conn.QueryRowContext(ctx, wrapped).Scan(&total); err != nil {
+		return 0, newConnectorError("count_failed", err.Error())
+	}
+	return total, nil
 }
 
 // scanRows converts result rows into evidence items, stopping at the row limit
