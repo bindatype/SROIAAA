@@ -13,13 +13,14 @@ import (
 )
 
 const (
-	pegasusDefaultTimeout = 30 * time.Second
-	// A small default is deliberate. It keeps results inside the model's
-	// context, and more importantly it pushes work into SQL: a model handed
-	// fifty rows and asked for a total will summarize them, and summarizing is
-	// where the wrong numbers come from. Raise it with SROIAAA_PEGASUS_MAX_ROWS
-	// if a real question needs more.
-	pegasusDefaultMaxRows = 50
+	pegasusDefaultTimeout = 60 * time.Second
+	// This bound is physics rather than policy: a result has to fit in a 32k
+	// context. It was fifty while uncollapsed window functions returned
+	// thousands of identical rows, which made listing look like the failure
+	// mode. With those collapsed an aggregate returns one row, so this now
+	// binds only on genuine listings and can be generous.
+	// SROIAAA_PEGASUS_MAX_ROWS overrides it.
+	pegasusDefaultMaxRows = 500
 	pegasusMaxCellBytes   = 4096
 	pegasusMaxTotalBytes  = 512 * 1024
 )

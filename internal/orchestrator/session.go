@@ -128,7 +128,7 @@ DAY and CURDATE() - INTERVAL 7 DAY select different sets, and here they differ
 by several hundred jobs. Use NOW() for a rolling window, and say which window
 you used so a reader can tell what was counted.
 
-Results are capped at a small number of rows. If the evidence summary contains
+Results are capped at 500 rows. If the evidence summary contains
 result_was_capped, you were given an arbitrary slice of a larger result and you
 must NOT summarize, total, or characterize it. One exception: if every row
 carries the same computed value, which is what an uncollapsed window function
