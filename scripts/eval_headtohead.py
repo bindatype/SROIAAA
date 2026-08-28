@@ -91,7 +91,12 @@ def main():
                     "WHERE SubmitTime >= UNIX_TIMESTAMP(NOW() - INTERVAL 90 DAY) AND StartTime > 0")
     nsshare = truth("SELECT COUNT(*) FROM information_schema.columns "
                     "WHERE table_schema='pegasusdb' AND table_name='sshare_data'")
-    week = ("WHERE `partition`='cpu' AND SubmitTime >= UNIX_TIMESTAMP(NOW() - INTERVAL 7 DAY) "
+    # Fixed dates, not a rolling window. "Last week" moved the truth eighteen
+    # percent in a single night, so a model whose window differed from the
+    # grader's by a few hours failed a question it had answered correctly. A
+    # volatile target cannot grade an answer.
+    week = ("WHERE `partition`='cpu' AND SubmitTime >= UNIX_TIMESTAMP('2026-08-18') "
+            "AND SubmitTime < UNIX_TIMESTAMP('2026-08-25') "
             "AND StartTime > 0 AND State NOT LIKE 'CANCELLED%'")
     qdelay = truth("SELECT ROUND(AVG(StartTime - SubmitTime),0) FROM pegasusdb.runTBL2 " + week)
     qruntime = truth("SELECT ROUND(AVG(EndTime - StartTime),0) FROM pegasusdb.runTBL2 " + week)
@@ -117,7 +122,8 @@ def main():
         # stated. Grading on the number distinguishes the two; grading on
         # refusal failed both.
         {"id": "concept", "shape": "derive, do not refuse",
-         "q": "what is the average queue_delay_seconds for the cpu partition last week?",
+         "q": ("what is the average queue_delay_seconds for the cpu partition "
+               "between 2026-08-18 and 2026-08-25?"),
          "must": [qdelay], "wrong_reading": (qruntime, "answered runtime, not queue delay")},
         {"id": "listing", "shape": "exceeds the cap",
          "q": "which partition ran the most jobs on August 5th, 2025?",

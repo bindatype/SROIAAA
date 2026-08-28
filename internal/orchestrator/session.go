@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -18,7 +19,39 @@ import (
 )
 
 //go:embed prompt.md
-var systemPrompt string
+var embeddedPrompt string
+
+// systemPrompt is the embedded prompt with its rule markers stripped, unless
+// SROIAAA_PROMPT names a file to use instead. The override exists so a prompt
+// change can be measured without a rebuild; nothing in normal operation reads
+// it.
+var systemPrompt = loadPrompt()
+
+// ruleMarker labels a block so an experiment can remove it by name. Markers are
+// stripped before the prompt is sent, so the model never sees them.
+var ruleMarker = regexp.MustCompile(`(?m)^<!-- rule:([a-z0-9-]+) -->\n`)
+
+var ruleEnd = regexp.MustCompile(`(?m)^<!-- /rule -->\n`)
+
+func loadPrompt() string {
+	text := embeddedPrompt
+	if path := os.Getenv("SROIAAA_PROMPT"); path != "" {
+		if raw, err := os.ReadFile(path); err == nil {
+			text = string(raw)
+		}
+	}
+	text = ruleMarker.ReplaceAllString(text, "")
+	return strings.TrimSpace(ruleEnd.ReplaceAllString(text, "")) + "\n"
+}
+
+// PromptRules lists the rule blocks the current prompt defines, in order.
+func PromptRules() []string {
+	var names []string
+	for _, match := range ruleMarker.FindAllStringSubmatch(embeddedPrompt, -1) {
+		names = append(names, match[1])
+	}
+	return names
+}
 
 const (
 	toolName = "sroiaaa_evidence"

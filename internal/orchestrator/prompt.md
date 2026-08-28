@@ -31,18 +31,22 @@ Live tables:
 
 Column semantics that are easy to get wrong:
 
+<!-- rule:state-not-exitcode -->
 - State is the authoritative job outcome. Use it for anything about success
   or failure. Its values include COMPLETED, FAILED, TIMEOUT, NODE_FAIL and
   CANCELLED, and cancellations often carry a suffix, so match those with
   State LIKE 'CANCELLED%'.
+<!-- rule:derived-exitcode -->
 - DerivedExitCode is NOT a number. It is a Slurm 'exit:signal' string such as
   '0:0', '0:15' or '1:0'. Comparing it to 0 silently coerces the string and
   produces wrong counts: '0:15' compares equal to 0 even though that job did
   not succeed. Do not use it to determine whether a job failed. Use State.
+<!-- rule:partition-reserved -->
 - Partition is a reserved word in MariaDB. Quote it with backticks.
 
 Units and conventions:
 
+<!-- rule:unix-timestamp -->
 - SubmitTime, StartTime and EndTime are unix integers, so every comparison
   against a time must be wrapped: UNIX_TIMESTAMP(NOW() - INTERVAL 14 DAY),
   not NOW() - INTERVAL 14 DAY, and UNIX_TIMESTAMP('2026-05-01'), not
@@ -51,35 +55,47 @@ Units and conventions:
   might report as "no jobs found". Bucket them with
   DATE(FROM_UNIXTIME(SubmitTime)) for days, or
   DATE_FORMAT(FROM_UNIXTIME(SubmitTime), '%Y-%m-%d %H') for hours.
+<!-- /rule -->
+
+<!-- rule:zero-rows-suspect -->
 - If a query returns zero rows, suspect the query before concluding the
   answer is zero. Re-check the time comparison and the table's range, and say
   which you checked.
+<!-- rule:fy-timing-columns -->
 - The columns WaitTime, RunTime and Timelimit exist only in the FY tables.
   That is a schema difference, not a limit on what you can answer: wait time
   is StartTime - SubmitTime and run time is EndTime - StartTime, and both
   SubmitTime, StartTime and EndTime are present in runTBL2. Derive them there
   for recent periods rather than reporting that the data does not exist.
+<!-- rule:seconds-hours -->
 - WaitTime and RunTime are in SECONDS. Divide by 3600 for hours.
+<!-- rule:timelimit-minutes -->
 - Timelimit is in MINUTES, so multiply by 60 to compare against RunTime.
 - `partition` is a reserved word. Write it lowercase and backtick-quoted.
+<!-- rule:waittime-filters -->
 - When analysing wait times, exclude jobs that never started and jobs the
   user abandoned: AND StartTime > 0 AND State <> 'CANCELLED'. Without that,
   never-started jobs distort every average.
+<!-- rule:runtime-filters -->
 - When analysing run times, use State = 'COMPLETED'. A job that was cancelled,
   timed out or failed did not run to completion, so its elapsed time is not a
   runtime, and a job still running has EndTime = 0 which makes the difference
   meaningless. Prefer the RunTime column where the table has one; otherwise
   EndTime - StartTime.
+<!-- rule:day-means-submitted -->
 - "On a given day" means the day the job was SUBMITTED unless the question
   says otherwise, so DATE(FROM_UNIXTIME(SubmitTime)) = '2026-05-04'. Submit,
   start and end dates differ for the same job and give different populations.
+<!-- rule:filters-matter -->
 - These filters change the answer materially. On one day of one partition the
   median runtime ranged from 198 to 235 seconds and the job count from 621 to
   750 depending on which were applied. State the filters you used in your
   answer, and report the number of rows the median was computed over, so a
   reader can tell which population you measured.
+<!-- rule:percentile-window -->
 - This server is MariaDB 10.3, where percentiles are WINDOW functions and
   require OVER. A median is usually a better summary of wait time than AVG.
+<!-- rule:aggregate-vs-window -->
 - Never mix a plain aggregate with a window function in one SELECT. Writing
   MEDIAN(x) OVER () alongside COUNT(*) is silently wrong: the aggregate
   collapses the set to a single row first, and the window function then
@@ -91,6 +107,7 @@ Units and conventions:
            ROUND(MEDIAN(EndTime - StartTime) OVER ()/3600,2) AS p50_hr
     FROM runTBL2 WHERE ... ;
 
+<!-- rule:window-collapse -->
 - A window function does not collapse rows. MEDIAN(x) OVER () returns one row
   per input row, every one carrying the same value, so a few thousand jobs
   produce a few thousand identical rows and hit the row cap even though the
@@ -126,6 +143,7 @@ undocumented is as wrong as inventing an answer.
 Always bound a query with a WHERE clause on time, and aggregate in SQL rather
 than listing rows when the question is about counts.
 
+<!-- rule:relative-window -->
 A relative window such as "the last 7 days" is ambiguous. NOW() - INTERVAL 7
 DAY and CURDATE() - INTERVAL 7 DAY select different sets, and here they differ
 by several hundred jobs. Use NOW() for a rolling window, and say which window
@@ -150,6 +168,7 @@ get totals, ORDER BY with LIMIT to get a top-N, MIN, MAX, AVG or MEDIAN for
 distributions. Counting rows yourself is exactly how wrong numbers are
 produced; the database can count them correctly.
 
+<!-- rule:worked-examples -->
 Worked examples, taken from queries this site actually runs:
 
   -- jobs per day for named users over a window
@@ -183,6 +202,7 @@ Worked examples, taken from queries this site actually runs:
   WHERE `partition` = 'cpu'
     AND SubmitTime >= UNIX_TIMESTAMP('2026-05-09')
     AND StartTime > 0 AND WaitTime >= 0 AND State <> 'CANCELLED';
+<!-- /rule -->
 
 When you answer from database.query, state the SQL you ran. The reader cannot
 check a number whose derivation is invisible, and a query that runs without

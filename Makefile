@@ -2,7 +2,7 @@ GO ?= go
 DIST ?= dist
 BINARY ?= sroiaaa-agent
 
-.PHONY: test run fmt build-linux-amd64 build-linux-arm64 build-linux-all docker-build docker-up fitness eval-models eval-zabbix eval-pegasus eval-headtohead
+.PHONY: test run fmt build-linux-amd64 build-linux-arm64 build-linux-all docker-build docker-up fitness eval-models eval-zabbix eval-pegasus eval-headtohead eval-ablate
 
 test:
 	$(GO) test ./...
@@ -45,3 +45,6 @@ eval-pegasus:
 
 eval-headtohead:
 	python3 ./scripts/eval_headtohead.py
+
+eval-ablate:
+	python3 ./scripts/eval_ablate.py
