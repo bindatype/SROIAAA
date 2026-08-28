@@ -298,15 +298,86 @@ func TestSessionRetriesOnceAfterAFailedExecution(t *testing.T) {
 		t.Errorf("answer = %q", answer)
 	}
 
-	var retried bool
+	var failed, recovered bool
 	for _, entry := range session.Trace() {
-		if entry.Stage == "retry_succeeded" {
-			retried = true
+		if entry.Stage == "execution_failed" {
+			failed = true
+		}
+		if failed && entry.Stage == "evidence_collected" {
+			recovered = true
 		}
 	}
-	if !retried {
-		t.Error("trace should record that a retry succeeded")
+	if !failed || !recovered {
+		t.Errorf("trace should show a failed call followed by a successful one: %+v", session.Trace())
 	}
+}
+
+func TestSessionCanLookBeforeItQueries(t *testing.T) {
+	// The behaviour a single tool call made impossible. Asked about something
+	// unfamiliar the model inspects first and answers second; with one call it
+	// would spend the call looking and stop without an answer.
+	var calls []broker.RouteStep
+	var turns int
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turns++
+		switch turns {
+		case 1:
+			io.WriteString(w, `{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[
+				{"id":"c1","type":"function","function":{"name":"sroiaaa_evidence","arguments":"{\"intent\":\"database.query\",\"query\":\"SELECT column_name FROM information_schema.columns\"}"}}]}}]}`)
+		case 2:
+			io.WriteString(w, `{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[
+				{"id":"c2","type":"function","function":{"name":"sroiaaa_evidence","arguments":"{\"intent\":\"database.query\",\"query\":\"SELECT shares FROM sshare_data LIMIT 5\"}"}}]}}]}`)
+		default:
+			io.WriteString(w, `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"sshare_data has 11 columns; here are the shares."}}]}`)
+		}
+	}))
+	defer server.Close()
+
+	recorder := &recordingConnector{fakeConnector{source: broker.SourcePegasusDB}, &calls}
+	session := newTestSession(t, server.URL, recorder)
+
+	answer, err := session.Ask(context.Background(), "what is in sshare_data?")
+	if err != nil {
+		t.Fatalf("Ask() error = %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("connector calls = %d, want 2 (inspect then query)", len(calls))
+	}
+	if !strings.Contains(calls[0].Query, "information_schema") {
+		t.Errorf("first call should inspect the schema, got %q", calls[0].Query)
+	}
+	if strings.Contains(calls[1].Query, "information_schema") {
+		t.Errorf("second call should query the table, got %q", calls[1].Query)
+	}
+	if answer == "" {
+		t.Error("a two-step question must still produce an answer")
+	}
+}
+
+func TestSessionStopsAtTheTurnLimit(t *testing.T) {
+	// A model that never answers must not loop forever.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[
+			{"id":"c","type":"function","function":{"name":"sroiaaa_evidence","arguments":"{"intent":"fleet.inventory"}"}}]}}]}`)
+	}))
+	defer server.Close()
+
+	session := newTestSession(t, server.URL, &fakeConnector{source: broker.SourceWazuhAPI})
+	if _, err := session.Ask(context.Background(), "list agents forever"); err == nil {
+		t.Fatal("expected the turn limit to end the loop")
+	}
+}
+
+// recordingConnector captures the steps it is asked to execute.
+type recordingConnector struct {
+	fakeConnector
+	steps *[]broker.RouteStep
+}
+
+func (r *recordingConnector) Execute(ctx context.Context, step broker.RouteStep) (connector.Evidence, error) {
+	*r.steps = append(*r.steps, step)
+	return r.fakeConnector.Execute(ctx, step)
 }
 
 // failingOnceConnector rejects the first host it is given and accepts the next,

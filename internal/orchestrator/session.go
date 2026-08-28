@@ -24,6 +24,11 @@ const (
 	// Headroom above what any connector will return, so evidence is rejected
 	// here only if a connector's own bound has failed.
 	maxEvidenceJSON = 64 * 1024
+
+	// maxToolCalls bounds the work, not the authority: each call is validated
+	// and authorized exactly as the first one is. Five is enough to look at a
+	// schema, run a query, and correct it once.
+	maxToolCalls = 5
 )
 
 // ToolDefinition is the single tool exposed to the model. Its schema is the
@@ -123,8 +128,18 @@ func (s *Session) Trace() []TraceEntry {
 	return s.trace
 }
 
-// Ask runs the full loop: propose an intent, validate it against policy,
-// execute the resulting plan, and synthesize an answer from the evidence.
+// Ask answers a question, letting the model work in steps.
+//
+// It gets several tool calls rather than one. A single call forces every
+// question into a single query, which is the wrong shape for the work: asked
+// about an unfamiliar table the model reaches for information_schema, and with
+// one call that inspection consumes the only turn it had. It would report the
+// columns and stop, having never answered. Given room, it can look before it
+// queries, count before it aggregates, and correct a query the database
+// rejected -- which is how a person would do it.
+//
+// Every call is validated and authorized independently. More turns is more
+// opportunity to work, not more authority.
 func (s *Session) Ask(ctx context.Context, question string) (string, error) {
 	s.trace = nil
 	s.started = time.Now()
@@ -141,62 +156,122 @@ func (s *Session) Ask(ctx context.Context, question string) (string, error) {
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: question},
 	}
+	tools := []any{ToolDefinition(s.intents)}
 
-	choice, err := s.client.Complete(ctx, messages, []any{ToolDefinition(s.intents)})
-	if err != nil {
-		return "", err
-	}
-	if len(choice.Message.ToolCalls) == 0 {
-		// Answering without evidence is legitimate: declining a question no
-		// source can answer is the behaviour we want, and recording it as a
-		// failure would make the audit misleading exactly where refusals matter.
-		s.record("model_answered_directly", "no tool call proposed", true)
-		answer := strings.TrimSpace(choice.Message.Content)
-		s.event.AnswerChars = len(answer)
-		if answer == "" {
-			s.event.Status = "failed"
-			return "", fmt.Errorf("model returned neither a tool call nor an answer")
+	for turn := 0; turn < maxToolCalls; turn++ {
+		choice, err := s.client.Complete(ctx, messages, tools)
+		if err != nil {
+			return "", err
 		}
-		return answer, nil
+
+		if len(choice.Message.ToolCalls) == 0 {
+			answer := strings.TrimSpace(choice.Message.Content)
+			if answer == "" {
+				s.record("empty_answer", "model returned neither a tool call nor content", false)
+				s.event.Status = "failed"
+				return "", fmt.Errorf("model returned neither a tool call nor an answer")
+			}
+			if turn == 0 {
+				s.record("model_answered_directly", "no tool call proposed", true)
+			} else {
+				s.record("answer_synthesized", "", true)
+			}
+			s.event.AnswerChars = len(answer)
+			return answer, nil
+		}
+
+		call := choice.Message.ToolCalls[0]
+		if call.Function.Name != toolName {
+			s.record("tool_rejected", fmt.Sprintf("model requested unknown tool %q", call.Function.Name), false)
+			return "", fmt.Errorf("model requested unknown tool %q", call.Function.Name)
+		}
+		s.record("intent_proposed", call.Function.Arguments, true)
+		if s.event.Proposed == "" {
+			s.event.Proposed = call.Function.Arguments
+		}
+
+		// The model's arguments are untrusted input on every turn, not just the
+		// first. They are decoded as strictly as any route request and
+		// authorized by policy before anything executes.
+		messages = append(messages, Message{
+			Role: "assistant", Content: choice.Message.Content, ToolCalls: choice.Message.ToolCalls,
+		})
+
+		result, failure := s.runOneCall(ctx, call)
+		if failure != nil {
+			// A refusal is an answer and ends the loop. A malformed call or a
+			// failed query is something the model can correct, so it goes back
+			// as a tool result and the loop continues.
+			if !failure.recoverable {
+				s.event.Decision = "denied"
+				return "", failure.err
+			}
+			messages = append(messages, Message{
+				Role: "tool", ToolCallID: call.ID, Name: toolName,
+				Content: fmt.Sprintf(`{"error":%q,"guidance":"Correct this and call the tool again."}`, failure.err.Error()),
+			})
+			continue
+		}
+
+		evidenceJSON, err := json.Marshal(result)
+		if err != nil {
+			return "", fmt.Errorf("encode evidence: %w", err)
+		}
+		if len(evidenceJSON) > maxEvidenceJSON {
+			messages = append(messages, Message{
+				Role: "tool", ToolCallID: call.ID, Name: toolName,
+				Content: `{"error":"the result was too large to return; narrow it or aggregate in SQL"}`,
+			})
+			continue
+		}
+
+		s.record("evidence_collected", fmt.Sprintf("%d source(s)", len(result.Evidence)), true)
+		for _, evidence := range result.Evidence {
+			s.event.Calls = append(s.event.Calls, AuditCall{
+				Source:     evidence.Source,
+				Action:     evidence.Action,
+				Endpoint:   evidence.Endpoint,
+				Query:      evidence.Query,
+				DurationMS: evidence.DurationMS,
+				ItemCount:  evidence.ItemCount,
+				Truncated:  evidence.Truncated,
+				Summary:    evidence.Summary,
+			})
+		}
+		messages = append(messages, Message{
+			Role: "tool", ToolCallID: call.ID, Name: toolName, Content: string(evidenceJSON),
+		})
 	}
 
-	call := choice.Message.ToolCalls[0]
-	if call.Function.Name != toolName {
-		s.record("tool_rejected", fmt.Sprintf("model requested unknown tool %q", call.Function.Name), false)
-		return "", fmt.Errorf("model requested unknown tool %q", call.Function.Name)
-	}
-	s.record("intent_proposed", call.Function.Arguments, true)
-	s.event.Proposed = call.Function.Arguments
+	s.record("turn_limit_reached", fmt.Sprintf("%d tool calls without an answer", maxToolCalls), false)
+	s.event.Status = "failed"
+	return "", fmt.Errorf("gave up after %d tool calls without an answer", maxToolCalls)
+}
 
-	// The model's arguments are untrusted input. They are decoded with the same
-	// strictness the broker applies to any route request, then authorized by
-	// policy before anything executes.
+// callFailure distinguishes a refusal, which ends the loop, from a mistake the
+// model can fix, which is returned to it.
+type callFailure struct {
+	err         error
+	recoverable bool
+}
+
+// runOneCall validates, authorizes and executes one proposed tool call.
+func (s *Session) runOneCall(ctx context.Context, call ToolCall) (connector.Result, *callFailure) {
 	request, err := broker.DecodeRouteRequest(newLimitedReader(call.Function.Arguments))
 	if err != nil {
 		s.record("intent_rejected", err.Error(), false)
-		return "", fmt.Errorf("model proposed an undecodable intent: %w", err)
+		return connector.Result{}, &callFailure{err: fmt.Errorf("undecodable intent: %w", err), recoverable: true}
 	}
 
 	plan, err := s.router.Plan(request)
 	if err != nil {
 		s.record("policy_denied", err.Error(), false)
-		s.event.Decision = "denied"
-		// A malformed call and a refused one are different things. Putting SQL
-		// in the wrong field is a mistake the model can fix, and returning it
-		// to the reader helps nobody. Being told a host is not authorized is an
-		// answer, and offering a second attempt would turn a refusal into an
-		// invitation to look for a host that is.
-		if !isRetryableRouteError(err) {
-			return "", fmt.Errorf("policy denied the proposed intent: %w", err)
+		// Being told a host is not authorized is an answer. Putting a value in
+		// the wrong field is a mistake. Only the second earns another attempt.
+		return connector.Result{}, &callFailure{
+			err:         fmt.Errorf("policy denied the proposed intent: %w", err),
+			recoverable: isRetryableRouteError(err),
 		}
-		retried, retryErr := s.retryWithError(ctx, messages, choice, call, err)
-		if retryErr != nil {
-			return "", retryErr
-		}
-		if retried == nil {
-			return "", fmt.Errorf("policy denied the proposed intent: %w", err)
-		}
-		return s.synthesize(ctx, messages, choice, call, *retried)
 	}
 	planJSON, _ := json.Marshal(plan)
 	s.record("policy_allowed", string(planJSON), true)
@@ -205,139 +280,10 @@ func (s *Session) Ask(ctx context.Context, question string) (string, error) {
 
 	result, err := s.executor.Execute(ctx, plan)
 	if err != nil {
-		// A source that executes a statement the model composed can fail for
-		// reasons the model can fix -- a reserved word left unquoted, a column
-		// that does not exist. Returning the error to the model once is far
-		// more useful than returning it to the reader, who did not write the
-		// query and cannot correct it. Exactly one retry, so a model that
-		// cannot fix its own mistake fails rather than looping.
-		retried, retryErr := s.retryWithError(ctx, messages, choice, call, err)
-		if retryErr != nil {
-			return "", retryErr
-		}
-		if retried == nil {
-			return "", fmt.Errorf("execute plan: %w", err)
-		}
-		result = *retried
+		s.record("execution_failed", err.Error(), false)
+		return connector.Result{}, &callFailure{err: err, recoverable: true}
 	}
-
-	return s.synthesize(ctx, messages, choice, call, result)
-}
-
-// synthesize returns evidence to the model and collects the written answer.
-func (s *Session) synthesize(ctx context.Context, messages []Message, choice Choice, call ToolCall, result connector.Result) (string, error) {
-	evidenceJSON, err := json.Marshal(result)
-	if err != nil {
-		return "", fmt.Errorf("encode evidence: %w", err)
-	}
-	if len(evidenceJSON) > maxEvidenceJSON {
-		return "", fmt.Errorf("evidence exceeded %d bytes; narrow the request", maxEvidenceJSON)
-	}
-	s.record("evidence_collected", fmt.Sprintf("%d source(s)", len(result.Evidence)), true)
-	for _, evidence := range result.Evidence {
-		s.event.Calls = append(s.event.Calls, AuditCall{
-			Source:     evidence.Source,
-			Action:     evidence.Action,
-			Endpoint:   evidence.Endpoint,
-			Query:      evidence.Query,
-			DurationMS: evidence.DurationMS,
-			ItemCount:  evidence.ItemCount,
-			Truncated:  evidence.Truncated,
-			Summary:    evidence.Summary,
-		})
-	}
-
-	messages = append(messages,
-		Message{Role: "assistant", Content: choice.Message.Content, ToolCalls: choice.Message.ToolCalls},
-		Message{Role: "tool", ToolCallID: call.ID, Name: toolName, Content: string(evidenceJSON)},
-	)
-
-	final, err := s.client.Complete(ctx, messages, nil)
-	if err != nil {
-		return "", err
-	}
-	answer := strings.TrimSpace(final.Message.Content)
-	if answer == "" {
-		// An empty answer is the worst failure available: the caller cannot tell
-		// it apart from success, and evidence was collected to produce nothing.
-		s.record("empty_answer", "model returned no content", false)
-		return "", fmt.Errorf("model returned an empty answer after collecting evidence")
-	}
-	s.record("answer_synthesized", "", true)
-	s.event.AnswerChars = len(answer)
-	return answer, nil
-}
-
-func (s *Session) record(stage, detail string, allowed bool) {
-	s.trace = append(s.trace, TraceEntry{Stage: stage, Detail: detail, Allowed: allowed})
-}
-
-// retryWithError gives the model one chance to correct a failed execution.
-// It returns nil, nil when no retry is warranted or the second attempt was no
-// better, leaving the caller to report the original failure.
-func (s *Session) retryWithError(ctx context.Context, messages []Message, choice Choice, call ToolCall, cause error) (*connector.Result, error) {
-	s.record("execution_failed", cause.Error(), false)
-
-	followUp := append(append([]Message(nil), messages...),
-		Message{Role: "assistant", Content: choice.Message.Content, ToolCalls: choice.Message.ToolCalls},
-		Message{Role: "tool", ToolCallID: call.ID, Name: toolName,
-			Content: fmt.Sprintf(`{"error":%q,"guidance":"The request failed. Correct it and call the tool once more. Do not apologize or explain; just issue the corrected call."}`, cause.Error())},
-	)
-
-	retry, err := s.client.Complete(ctx, followUp, []any{ToolDefinition(s.intents)})
-	if err != nil {
-		return nil, err
-	}
-	if len(retry.Message.ToolCalls) == 0 {
-		return nil, nil
-	}
-	retryCall := retry.Message.ToolCalls[0]
-	if retryCall.Function.Name != toolName {
-		return nil, nil
-	}
-	s.record("retry_proposed", retryCall.Function.Arguments, true)
-
-	request, err := broker.DecodeRouteRequest(newLimitedReader(retryCall.Function.Arguments))
-	if err != nil {
-		s.record("retry_rejected", err.Error(), false)
-		return nil, nil
-	}
-	plan, err := s.router.Plan(request)
-	if err != nil {
-		s.record("retry_denied", err.Error(), false)
-		return nil, nil
-	}
-
-	result, err := s.executor.Execute(ctx, plan)
-	if err != nil {
-		s.record("retry_failed", err.Error(), false)
-		return nil, nil
-	}
-	// A question denied and then corrected is neither a plain denial nor a
-	// clean pass. Recording it as "denied" understates what happened, and as
-	// "allowed" hides that the first attempt was refused.
-	s.record("retry_succeeded", "", true)
-	s.event.Decision = "allowed_on_retry"
-	retryPlanJSON, _ := json.Marshal(plan)
-	s.event.Plan = retryPlanJSON
-	return &result, nil
-}
-
-// isRetryableRouteError reports whether a denial describes a malformed request
-// rather than a refused one. Authorization outcomes are never retried.
-func isRetryableRouteError(err error) bool {
-	var routeErr *broker.RouteError
-	if !errors.As(err, &routeErr) {
-		return false
-	}
-	switch routeErr.Code {
-	case "invalid_request", "invalid_query", "invalid_host", "invalid_resource",
-		"missing_host", "missing_resource", "unknown_intent":
-		return true
-	default:
-		// host_not_authorized and resource_not_authorized land here.
-		return false
-	}
+	return result, nil
 }
 
 // writeAudit records the event, filling in the outcome from the trace. It runs
@@ -370,4 +316,29 @@ func newRequestID() string {
 		return fmt.Sprintf("t%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(buffer)
+}
+
+// record appends a decision to the trace, which -trace prints and which
+// writeAudit reads to describe the outcome.
+func (s *Session) record(stage, detail string, allowed bool) {
+	s.trace = append(s.trace, TraceEntry{Stage: stage, Detail: detail, Allowed: allowed})
+}
+
+// isRetryableRouteError reports whether a denial describes a malformed request
+// rather than a refused one. Authorization outcomes are never retried: putting
+// a value in the wrong field is a mistake the model can fix, while being told a
+// host is not authorized is an answer, and offering another attempt would turn
+// a refusal into an invitation to look for a host that is.
+func isRetryableRouteError(err error) bool {
+	var routeErr *broker.RouteError
+	if !errors.As(err, &routeErr) {
+		return false
+	}
+	switch routeErr.Code {
+	case "invalid_request", "invalid_query", "invalid_host", "invalid_resource",
+		"missing_host", "missing_resource", "unknown_intent":
+		return true
+	default:
+		return false
+	}
 }

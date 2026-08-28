@@ -65,6 +65,19 @@ Units and conventions:
 - When analysing wait times, exclude jobs that never started and jobs the
   user abandoned: AND StartTime > 0 AND State <> 'CANCELLED'. Without that,
   never-started jobs distort every average.
+- When analysing run times, use State = 'COMPLETED'. A job that was cancelled,
+  timed out or failed did not run to completion, so its elapsed time is not a
+  runtime, and a job still running has EndTime = 0 which makes the difference
+  meaningless. Prefer the RunTime column where the table has one; otherwise
+  EndTime - StartTime.
+- "On a given day" means the day the job was SUBMITTED unless the question
+  says otherwise, so DATE(FROM_UNIXTIME(SubmitTime)) = '2026-05-04'. Submit,
+  start and end dates differ for the same job and give different populations.
+- These filters change the answer materially. On one day of one partition the
+  median runtime ranged from 198 to 235 seconds and the job count from 621 to
+  750 depending on which were applied. State the filters you used in your
+  answer, and report the number of rows the median was computed over, so a
+  reader can tell which population you measured.
 - This server is MariaDB 10.3, where percentiles are WINDOW functions and
   require OVER. A median is usually a better summary of wait time than AVG.
 - A window function does not collapse rows. MEDIAN(x) OVER () returns one row
