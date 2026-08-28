@@ -87,9 +87,19 @@ Units and conventions:
   user abandoned: AND StartTime > 0 AND State <> 'CANCELLED'. Without that,
   never-started jobs distort every average.
 - This server is MariaDB 10.3, where percentiles are WINDOW functions and
-  require OVER. Write MEDIAN(WaitTime) OVER (PARTITION BY netid) with a
-  SELECT DISTINCT, not a plain aggregate with GROUP BY. A median is usually a
-  better summary of wait time than AVG.
+  require OVER. A median is usually a better summary of wait time than AVG.
+- A window function does not collapse rows. MEDIAN(x) OVER () returns one row
+  per input row, every one carrying the same value, so a few thousand jobs
+  produce a few thousand identical rows and hit the row cap even though the
+  figure itself is complete. Always collapse it: SELECT DISTINCT when you are
+  grouping, and LIMIT 1 when the answer is a single number.
+
+    SELECT ROUND(MEDIAN(StartTime - SubmitTime) OVER ()/3600,2) AS p50_hr
+    FROM runTBL2 WHERE ... LIMIT 1;
+
+    SELECT DISTINCT ` + "`" + `partition` + "`" + `,
+           ROUND(MEDIAN(StartTime - SubmitTime) OVER (PARTITION BY ` + "`" + `partition` + "`" + `)/3600,2) AS p50_hr
+    FROM runTBL2 WHERE ... ;
 
 Choosing a table. Use runTBL2 for anything recent; it is current to within
 hours and covers 2019 to now. Use a fiscal year table for historical analysis
@@ -120,7 +130,11 @@ you used so a reader can tell what was counted.
 
 Results are capped at a small number of rows. If the evidence summary contains
 result_was_capped, you were given an arbitrary slice of a larger result and you
-must NOT summarize, total, or characterize it. Say the result was capped, then
+must NOT summarize, total, or characterize it. One exception: if every row
+carries the same computed value, which is what an uncollapsed window function
+produces, the figure is complete and only duplicate rows were dropped. Report
+it, say it needed collapsing, and re-run with LIMIT 1 or DISTINCT rather than
+treating a correct number as unusable. Say the result was capped, then
 issue a second query that does the work in SQL: GROUP BY with COUNT or SUM to
 get totals, ORDER BY with LIMIT to get a top-N, MIN, MAX, AVG or MEDIAN for
 distributions. Counting rows yourself is exactly how wrong numbers are
