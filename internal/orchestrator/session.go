@@ -166,6 +166,21 @@ func (s *Session) Ask(ctx context.Context, question string) (string, error) {
 
 		if len(choice.Message.ToolCalls) == 0 {
 			answer := strings.TrimSpace(choice.Message.Content)
+
+			// A weaker model sometimes writes out the call it means to make --
+			// the SQL, the arguments, sometimes a code block -- and stops,
+			// having described the action instead of taking it. Returning that
+			// hands the caller a plan where an answer should be. With turns
+			// left, ask again.
+			if describesACallInstead(answer) && turn < maxToolCalls-1 {
+				s.record("described_instead_of_called", "model wrote out a tool call rather than making one", false)
+				messages = append(messages,
+					Message{Role: "assistant", Content: answer},
+					Message{Role: "user", Content: "You described the tool call instead of making it. Make the call now. Do not restate the plan or the SQL; issue the call."},
+				)
+				continue
+			}
+
 			if answer == "" {
 				s.record("empty_answer", "model returned neither a tool call nor content", false)
 				s.event.Status = "failed"
@@ -341,4 +356,33 @@ func isRetryableRouteError(err error) bool {
 	default:
 		return false
 	}
+}
+
+// describesACallInstead reports whether an answer looks like a tool call that
+// was written out rather than issued. It is a heuristic over model prose, so
+// it errs toward letting text through: the cost of a false positive is one
+// wasted turn, while a false negative returns a plan to someone who asked a
+// question.
+func describesACallInstead(answer string) bool {
+	if answer == "" {
+		return false
+	}
+	lowered := strings.ToLower(answer)
+
+	// Naming the tool, or naming an intent, while producing no call at all.
+	mentionsTheCall := strings.Contains(lowered, strings.ToLower(toolName)) ||
+		strings.Contains(lowered, "intent=") ||
+		strings.Contains(lowered, `"intent":`) ||
+		strings.Contains(lowered, "intent='")
+
+	// Announcing the action rather than reporting a result.
+	announces := strings.Contains(lowered, "let's execute") ||
+		strings.Contains(lowered, "lets execute") ||
+		strings.Contains(lowered, "i will now") ||
+		strings.Contains(lowered, "now i will") ||
+		strings.Contains(lowered, "let's construct") ||
+		strings.Contains(lowered, "i need to query") ||
+		strings.Contains(lowered, "execute this via the tool")
+
+	return mentionsTheCall || announces
 }

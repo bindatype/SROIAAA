@@ -445,3 +445,61 @@ func TestAuditRecordsTheTranslationAndTheDenial(t *testing.T) {
 		t.Errorf("audit file mode = %o, want 600", mode)
 	}
 }
+
+func TestSessionPushesBackWhenACallIsDescribedNotMade(t *testing.T) {
+	// A weaker model sometimes writes out the call it intends and stops. The
+	// answer looks deliberate and contains no result, so returning it hands the
+	// caller a plan where an answer should be.
+	var turns int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turns++
+		if turns == 1 {
+			io.WriteString(w, `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"Let's construct the query. I will use intent='database.query' with a SELECT over runTBL2."}}]}`)
+			return
+		}
+		if turns == 2 {
+			io.WriteString(w, `{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[
+				{"id":"c1","type":"function","function":{"name":"sroiaaa_evidence","arguments":"{\"intent\":\"fleet.inventory\"}"}}]}}]}`)
+			return
+		}
+		io.WriteString(w, `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"275 agents, 52 disconnected."}}]}`)
+	}))
+	defer server.Close()
+
+	session := newTestSession(t, server.URL, &fakeConnector{source: broker.SourceWazuhAPI})
+	answer, err := session.Ask(context.Background(), "how many agents are there?")
+	if err != nil {
+		t.Fatalf("Ask() error = %v", err)
+	}
+	if strings.Contains(answer, "construct the query") {
+		t.Errorf("a described call was returned as the answer: %q", answer)
+	}
+	if answer != "275 agents, 52 disconnected." {
+		t.Errorf("answer = %q", answer)
+	}
+
+	var pushedBack bool
+	for _, entry := range session.Trace() {
+		if entry.Stage == "described_instead_of_called" {
+			pushedBack = true
+		}
+	}
+	if !pushedBack {
+		t.Error("trace should record the push-back")
+	}
+}
+
+func TestDescribesACallInsteadLetsRealAnswersThrough(t *testing.T) {
+	// False positives cost a turn; false negatives return a plan to a person
+	// who asked a question. Real answers must not trip it.
+	for _, answer := range []string{
+		"There were 503 completed jobs with a median runtime of 224 seconds.",
+		"The Wazuh agent on log001 is active, last seen 2026-08-27T18:15:20Z.",
+		"No critical CVEs can be reported; there is no vulnerability data source.",
+		"dss01 has 7 active problems, the most severe being a GPFS filesystem panic.",
+	} {
+		if describesACallInstead(answer) {
+			t.Errorf("real answer misread as a described call: %q", answer)
+		}
+	}
+}
