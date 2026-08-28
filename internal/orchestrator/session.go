@@ -158,8 +158,10 @@ func (s *Session) Ask(ctx context.Context, question string) (string, error) {
 	}
 	tools := []any{ToolDefinition(s.intents)}
 
+	forceTool := ""
 	for turn := 0; turn < maxToolCalls; turn++ {
-		choice, err := s.client.Complete(ctx, messages, tools)
+		choice, err := s.client.Complete(ctx, messages, tools, forceTool)
+		forceTool = ""
 		if err != nil {
 			return "", err
 		}
@@ -173,11 +175,15 @@ func (s *Session) Ask(ctx context.Context, question string) (string, error) {
 			// hands the caller a plan where an answer should be. With turns
 			// left, ask again.
 			if describesACallInstead(answer) && turn < maxToolCalls-1 {
-				s.record("described_instead_of_called", "model wrote out a tool call rather than making one", false)
+				// Asking again in prose is what failed the first time. The next
+				// turn names the function in tool_choice, so a call is the only
+				// shape the response can take.
+				s.record("described_instead_of_called", "model wrote out a tool call rather than making one; forcing the call", false)
 				messages = append(messages,
 					Message{Role: "assistant", Content: answer},
-					Message{Role: "user", Content: "You described the tool call instead of making it. Make the call now. Do not restate the plan or the SQL; issue the call."},
+					Message{Role: "user", Content: "Make that call now."},
 				)
+				forceTool = toolName
 				continue
 			}
 

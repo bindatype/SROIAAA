@@ -118,14 +118,32 @@ type completionResponse struct {
 }
 
 // Complete sends one chat completion request and returns the first choice.
-func (c *MindRouterClient) Complete(ctx context.Context, messages []Message, tools []any) (Choice, error) {
+// forceTool names a function the model must call. Empty leaves the choice to
+// the model, which is what allows it to decline a question no source can
+// answer.
+//
+// Note that MindRouter does not currently honour this. Measured on
+// 2026-08-27, a request naming a function by name still returned
+// finish_reason "stop" with no tool call, for every model tried. The field is
+// sent because it is the correct request to make and other gateways respect
+// it, but nothing here should be written as though a call were guaranteed:
+// the caller must still handle a response that describes a call instead of
+// making one.
+func (c *MindRouterClient) Complete(ctx context.Context, messages []Message, tools []any, forceTool string) (Choice, error) {
 	body := map[string]any{
 		"model":    c.model,
 		"messages": messages,
 	}
 	if len(tools) > 0 {
 		body["tools"] = tools
-		body["tool_choice"] = "auto"
+		if forceTool != "" {
+			body["tool_choice"] = map[string]any{
+				"type":     "function",
+				"function": map[string]any{"name": forceTool},
+			}
+		} else {
+			body["tool_choice"] = "auto"
+		}
 	}
 
 	payload, err := json.Marshal(body)
