@@ -18,6 +18,10 @@ const (
 	zabbixDefaultTimeout   = 15 * time.Second
 	zabbixMaxResponseBytes = 1 << 20
 	zabbixMaxLimit         = 500
+	// maxCensusRows bounds the severity census. It returns one small integer
+	// per matching row, so a few thousand is cheap, but it must still be
+	// bounded: an unbounded fetch is the thing every other limit here prevents.
+	maxCensusRows = 20000
 )
 
 // zabbixMethods is the fixed action table. A plan may only name an action that
@@ -138,14 +142,14 @@ func (c *ZabbixConnector) Execute(ctx context.Context, step broker.RouteStep) (E
 	// indistinguishable from a complete one. Ask separately for the true count,
 	// otherwise a model will state the plan's limit as though it were the
 	// population.
-	total, err := c.count(ctx, method, params)
+	total, severities, err := c.census(ctx, method, params)
 	if err != nil {
 		return Evidence{}, err
 	}
 
 	items := normalizeTriggers(result)
 
-	summary := summarizeTriggers(items, total)
+	summary := summarizeTriggers(items, total, severities)
 	if step.Host != "" && total == 0 {
 		// Zero rows for a named host is ambiguous: the host may be healthy, or
 		// it may not exist. Reporting "no problems" for a host Zabbix has never
@@ -175,44 +179,55 @@ func (c *ZabbixConnector) Execute(ctx context.Context, step broker.RouteStep) (E
 	}, nil
 }
 
-// count asks how many rows match the same filters, so the caller can tell a
-// bounded page from a complete answer.
-func (c *ZabbixConnector) count(ctx context.Context, method string, params map[string]any) (int, error) {
-	countParams := make(map[string]any, len(params))
+// census asks how many rows match the same filters, and how they break down by
+// severity.
+//
+// It fetches only the priority column for every matching row and counts them
+// here. That is one round trip rather than the countOutput call it replaces,
+// and it buys the difference between "844 alerts today" and "844 alerts today,
+// three of them disaster". Counting severities among the returned page instead
+// describes the page, which is not what a reader asked about.
+func (c *ZabbixConnector) census(ctx context.Context, method string, params map[string]any) (int, map[string]int, error) {
+	censusParams := make(map[string]any, len(params))
 	for key, value := range params {
 		switch key {
-		case "limit", "sortfield", "sortorder", "output", "selectHosts", "expandDescription":
+		case "limit", "sortfield", "sortorder", "selectHosts", "expandDescription":
 			continue
 		}
-		countParams[key] = value
+		censusParams[key] = value
 	}
-	countParams["countOutput"] = true
+	censusParams["output"] = []string{"priority"}
+	censusParams["limit"] = maxCensusRows
 
-	payload, err := c.rawCall(ctx, method, countParams)
+	payload, err := c.rawCall(ctx, method, censusParams)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-
-	// countOutput returns the total as a JSON string.
 	var envelope struct {
-		Result json.RawMessage `json:"result"`
+		Result []struct {
+			Priority string `json:"priority"`
+		} `json:"result"`
+		Error *struct {
+			Message string `json:"message"`
+			Data    string `json:"data"`
+		} `json:"error"`
 	}
 	if err := json.Unmarshal(payload, &envelope); err != nil {
-		return 0, newConnectorError("decode_response", err.Error())
+		return 0, nil, newConnectorError("decode_response", err.Error())
 	}
-	var asString string
-	if err := json.Unmarshal(envelope.Result, &asString); err == nil {
-		parsed, err := strconv.Atoi(asString)
-		if err != nil {
-			return 0, newConnectorError("decode_response", "unparseable count: "+asString)
+	if envelope.Error != nil {
+		return 0, nil, newConnectorError("zabbix_error", envelope.Error.Message+": "+envelope.Error.Data)
+	}
+
+	counts := make(map[string]int, 6)
+	for _, row := range envelope.Result {
+		severity, ok := zabbixPriority[row.Priority]
+		if !ok {
+			severity = "unknown"
 		}
-		return parsed, nil
+		counts[severity]++
 	}
-	var asNumber int
-	if err := json.Unmarshal(envelope.Result, &asNumber); err != nil {
-		return 0, newConnectorError("decode_response", "unexpected count shape")
-	}
-	return asNumber, nil
+	return len(envelope.Result), counts, nil
 }
 
 // hostExists reports whether Zabbix monitors a host by this exact name.
@@ -370,17 +385,16 @@ func redactEndpoint(endpoint string) string {
 
 // summarizeTriggers counts problems by severity so a model never has to tally
 // them itself.
-func summarizeTriggers(items []EvidenceItem, totalMatching int) map[string]int {
-	// "returned" and "total_matching" are kept distinct so a model cannot
-	// mistake a bounded page for the whole population.
+func summarizeTriggers(items []EvidenceItem, totalMatching int, severities map[string]int) map[string]int {
+	// Severity counts describe every matching row, not the returned page. A
+	// breakdown of the page answers a question nobody asked: a reader wants to
+	// know how many of the 844 are disasters, not how many of the 25 shown are.
 	summary := map[string]int{
 		"returned":       len(items),
 		"total_matching": totalMatching,
 	}
-	for _, item := range items {
-		if item.Severity != "" {
-			summary[item.Severity]++
-		}
+	for severity, count := range severities {
+		summary[severity] = count
 	}
 	return summary
 }

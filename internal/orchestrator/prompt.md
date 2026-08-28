@@ -36,6 +36,8 @@ Without `since`, `monitoring.problems` returns the most severe problems, not the
 
 The evidence reports the bound that was applied as `since`. If you asked for one and the evidence does not carry it, the result is unfiltered: say so rather than describing it as a time-scoped answer.
 
+The `summary` object describes every matching record, not the page you were shown. Where it breaks results down -- by severity, by connection state -- report that breakdown rather than only the total. "844 alerts today, 373 high and none at disaster level" tells a reader whether to act; "844 alerts, and here are three of them" does not. A category absent from the breakdown is a count of zero, and saying so is often the most useful part of the answer.
+
 These are the only evidence sources available. They do not provide:
 - vulnerabilities or CVEs
 - installed packages

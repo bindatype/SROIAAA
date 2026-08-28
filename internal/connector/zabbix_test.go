@@ -22,10 +22,10 @@ func TestZabbixConnectorNormalizesTriggers(t *testing.T) {
 			t.Errorf("Content-Type = %q", got)
 		}
 		body, _ := io.ReadAll(r.Body)
-		if strings.Contains(string(body), "countOutput") {
-			// The count call intentionally strips presentation parameters, so
-			// it must not overwrite what the data call sent.
-			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":"2"}`)
+		if strings.Contains(string(body), `"priority"]`) && !strings.Contains(string(body), "selectHosts") {
+			// The severity census asks for priority only and strips presentation
+			// parameters, so it must not overwrite what the data call sent.
+			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[{"priority":"4"},{"priority":"2"}]}`)
 			return
 		}
 		if err := json.Unmarshal(body, &captured); err != nil {
@@ -182,8 +182,13 @@ func asConnectorError(err error, target **ConnectorError) bool {
 func TestZabbixSummaryCountsBySeverityAndRendersTimestamps(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
-		if strings.Contains(string(raw), "countOutput") {
-			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":"97"}`)
+		if strings.Contains(string(raw), `"priority"]`) && !strings.Contains(string(raw), "selectHosts") {
+			// 97 matching rows: one disaster, 96 high. The page shows three.
+			census := `{"jsonrpc":"2.0","id":1,"result":[{"priority":"5"}`
+			for i := 0; i < 96; i++ {
+				census += `,{"priority":"4"}`
+			}
+			io.WriteString(w, census+`]}`)
 			return
 		}
 		io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[
@@ -210,8 +215,10 @@ func TestZabbixSummaryCountsBySeverityAndRendersTimestamps(t *testing.T) {
 	if !evidence.Truncated {
 		t.Error("a bounded page of a larger match set must be marked truncated")
 	}
-	if evidence.Summary["high"] != 2 {
-		t.Errorf("high = %d, want 2", evidence.Summary["high"])
+	// Severity counts describe all 97 matching rows, not the 3 returned. A
+	// breakdown of the page answers a question nobody asked.
+	if evidence.Summary["high"] != 96 {
+		t.Errorf("high = %d, want 96 across the full match", evidence.Summary["high"])
 	}
 	if evidence.Summary["disaster"] != 1 {
 		t.Errorf("disaster = %d, want 1", evidence.Summary["disaster"])
@@ -243,8 +250,8 @@ func TestZabbixDistinguishesUnknownHostFromHealthyHost(t *testing.T) {
 					} else {
 						io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[]}`)
 					}
-				case strings.Contains(body, "countOutput"):
-					io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":"0"}`)
+				case strings.Contains(body, `"priority"]`):
+					io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[]}`)
 				default:
 					io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[]}`)
 				}
