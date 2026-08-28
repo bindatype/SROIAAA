@@ -98,6 +98,9 @@ def main():
     week = ("WHERE `partition`='cpu' AND SubmitTime >= UNIX_TIMESTAMP('2026-08-18') "
             "AND SubmitTime < UNIX_TIMESTAMP('2026-08-25') "
             "AND StartTime > 0 AND State NOT LIKE 'CANCELLED%'")
+    # This must match the filter the prompt teaches. When it did not, the
+    # model followed the prompt, the grader used a different rule, and the
+    # five percent gap looked like a model failure for two days.
     qdelay = truth("SELECT ROUND(AVG(StartTime - SubmitTime),0) FROM pegasusdb.runTBL2 " + week)
     qruntime = truth("SELECT ROUND(AVG(EndTime - StartTime),0) FROM pegasusdb.runTBL2 " + week)
 

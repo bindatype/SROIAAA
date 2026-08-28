@@ -44,21 +44,29 @@ func TestPromptDescribesEveryToolParameter(t *testing.T) {
 func TestPromptRetainsItsHardWonRules(t *testing.T) {
 	// Each of these is in the prompt because its absence produced a specific
 	// wrong answer. Removing one should require deleting a test and saying why.
+	// Needles name the substance of a rule, not a sentence. The prompt was
+	// rewritten once and every phrase-tied needle fired, which is the test
+	// working -- but a needle pinned to wording has to be relaxed on every
+	// edit until it stops meaning anything.
 	rules := []struct {
 		needle string
 		why    string
 	}{
-		{"State is the authoritative job outcome",
+		{"authoritative job outcome",
 			"using DerivedExitCode reported 26 failures against a true 496"},
-		{"UNIX_TIMESTAMP(NOW()",
+		{"UNIX_TIMESTAMP",
 			"comparing an integer column to a datetime silently matched zero rows"},
 		{"total_matching",
 			"without comparing it to returned, a truncated result reads as complete"},
-		{"Absence of evidence is not evidence of absence",
+		{"proof of absence",
 			"an empty Zabbix result was reported as 'no critical CVEs'"},
+		{"reassur",
+			"the same failure, stated as a reassurance rather than a finding"},
+		{"NOT LIKE 'CANCELLED%'",
+			"State <> 'CANCELLED' keeps suffixed cancellations and shifts wait times by 5%"},
 		{"information_schema",
 			"the prompt previously implied its own table list was exhaustive"},
-		{"does not collapse rows",
+		{"collapse rows",
 			"an uncollapsed window function filled the result with duplicates"},
 	}
 	for _, rule := range rules {
