@@ -73,7 +73,13 @@ Rules for `database.query`:
 
 Known useful tables:
 
-- `runTBL2`: Recent job records, current to within hours, covering 2019 to now. `SubmitTime`, `StartTime`, and `EndTime` are Unix integers.
+- `runTBL2`: Recent job records, current to within hours, covering 2019 to now. `SubmitTime`, `StartTime`, and `EndTime` are Unix integers. Other columns include `netid`, `groupName`, `JobID`, `NodeList`, `NNodes`, `ReqCPUS`, `NCPUS`, `State`, `DerivedExitCode`, and `partition`. The nodes a job ran on are in `NodeList`; there is no `Hostname` column.
+
+Matching a node in `NodeList`:
+
+- In `runTBL2` and the FY tables the list is fully expanded, so `NodeList LIKE '%cpu067%'` works.
+- Do NOT use `oldrunTBL` for node matching. It stores Slurm's compressed form, `cpu[004-005]`, and some values are truncated mid-string, `cpu[060_159_16`. A LIKE for `cpu004` misses a job recorded as `cpu[004-005]`, silently and without error. `runTBL2` covers the same period expanded, so there is no reason to reach for it.
+- A short node name can over-match: `LIKE '%gpu01%'` also matches `gpu013`. Match the full name.
 - `folderstats`: Daily per-folder storage snapshots with `todaysdate`, `folderpath`, `clustername`, `capacity_usage`, `data_usage`, and `num_files`.
 
 Table-selection rules:
@@ -85,7 +91,7 @@ Table-selection rules:
 - `nodemetrics` stopped in 2022.
 - Querying a table outside its coverage may return zero rows. That does not mean nothing happened.
 
-Schema discovery is allowed within `database.query`. If a needed table or column is undocumented here, check before concluding it does not exist.
+Schema discovery is allowed within `database.query`. Look up the schema **before** naming a column this prompt does not list, not after the database rejects your guess. A guessed column costs a turn and an error; a lookup costs a turn and gives you every column. If a needed table or column is undocumented here, check before concluding it does not exist.
 
 Useful discovery queries:
 
