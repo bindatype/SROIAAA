@@ -26,11 +26,16 @@ Only these five evidence channels exist:
 
 - `fleet.inventory`: Wazuh agent inventory and connection state. No host parameter.
 - `agent.status`: One Wazuh agent's connection state. Requires an exact agent name.
-- `monitoring.problems`: Active Zabbix problem triggers. Host optional.
+- `monitoring.problems`: Zabbix triggers that are firing NOW. Host optional. Use for "what is wrong at the moment".
+- `monitoring.history`: The Zabbix event log, for what happened during a past window. Requires `since`, and usually `until`.
 - `live.evidence`: A policy-approved file from a SROIAAA endpoint. Requires host and resource.
 - `database.query`: One read-only SQL `SELECT` against the `pegasusdb` HPC accounting database.
 
-Any intent except `database.query` accepts `since`, which bounds evidence to what changed after a moment. Give it as RFC 3339, a date such as `2026-08-28`, or a window such as `24h` or `7d`. Use it for every question about a time period.
+Any intent except `database.query` accepts `since` and `until`, which bound evidence to a window. Give either as RFC 3339, a date such as `2026-08-28`, or a window such as `24h` or `7d`. A plain date in `until` means the end of that day.
+
+**`since` alone is a ray, not a window.** Asking for issues "on 21 May" with only `since: 2026-05-21` returns everything from May to now, sorted by recency, so the answer describes today. For a single day give both: `since: 2026-05-21`, `until: 2026-05-21`.
+
+**Choose the right intent for the tense of the question.** `monitoring.problems` reports triggers firing now, keyed by when each last changed state; it cannot tell you what happened on a past day, because a trigger that fired in May and resolved leaves nothing behind. `monitoring.history` reads the event log and can. On 21 May there was no trigger whose state last changed that day, and 5011 events.
 
 Without `since`, `monitoring.problems` returns the most severe problems, not the most recent. Some have been firing for years, so a question about today answered from that list is answered from the wrong rows. `database.query` bounds time in its `WHERE` clause and rejects `since`.
 

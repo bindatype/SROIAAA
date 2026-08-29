@@ -26,7 +26,11 @@ type Evidence struct {
 	// asked for one and gets evidence back without it has been answered from
 	// unfiltered data, which for a time-scoped question is wrong in the
 	// direction that reads as right.
-	Since       string    `json:"since,omitempty"`
+	Since string `json:"since,omitempty"`
+	// Until is the upper bound applied. Without one a window is a ray: a
+	// request for issues on a single past day returned everything from that day
+	// to now, sorted by recency, so the answer described today.
+	Until       string    `json:"until,omitempty"`
 	RequestedAt time.Time `json:"requested_at"`
 	DurationMS  int64     `json:"duration_ms"`
 	ItemCount   int       `json:"item_count"`

@@ -48,9 +48,19 @@ func (r *Router) Plan(request RouteRequest) (RoutePlan, error) {
 	if err != nil {
 		return RoutePlan{}, newRouteError("invalid_since", err.Error())
 	}
-	sinceValue := ""
+	until, err := ParseUntil(request.Until, time.Now())
+	if err != nil {
+		return RoutePlan{}, newRouteError("invalid_until", err.Error())
+	}
+	if !since.IsZero() && !until.IsZero() && !until.After(since) {
+		return RoutePlan{}, newRouteError("invalid_until", "until must be after since")
+	}
+	sinceValue, untilValue := "", ""
 	if !since.IsZero() {
 		sinceValue = since.Format(time.RFC3339)
+	}
+	if !until.IsZero() {
+		untilValue = until.Format(time.RFC3339)
 	}
 
 	switch request.Intent {
@@ -91,6 +101,7 @@ func (r *Router) Plan(request RouteRequest) (RoutePlan, error) {
 			Host:   request.Host,
 			Limit:  monitoringIssueLimit,
 			Since:  sinceValue,
+			Until:  untilValue,
 		}), nil
 
 	case IntentDatabaseQuery:
@@ -101,9 +112,9 @@ func (r *Router) Plan(request RouteRequest) (RoutePlan, error) {
 			return RoutePlan{}, newRouteError("invalid_request",
 				"database.query takes the SQL in the \"query\" field; it does not accept \"host\" or \"resource\"")
 		}
-		if request.Since != "" {
+		if request.Since != "" || request.Until != "" {
 			return RoutePlan{}, newRouteError("invalid_request",
-				"database.query bounds time in the SQL WHERE clause; it does not take since")
+				"database.query bounds time in its WHERE clause; it does not take since or until")
 		}
 		if err := ValidateQuery(request.Query); err != nil {
 			return RoutePlan{}, newRouteError("invalid_query", err.Error())
@@ -113,6 +124,31 @@ func (r *Router) Plan(request RouteRequest) (RoutePlan, error) {
 			Action: "query.execute",
 			Query:  strings.TrimSpace(request.Query),
 			Limit:  maxQueryRows,
+		}), nil
+
+	case IntentMonitoringHistory:
+		// The event log, not current trigger state. A question about a past day
+		// cannot be answered from trigger.get, which reports what is wrong now:
+		// May 21st had no triggers whose state last changed that day, and 5011
+		// events.
+		if request.Resource != "" {
+			return RoutePlan{}, newRouteError("invalid_request", "monitoring.history does not accept resource")
+		}
+		if request.Host != "" {
+			if err := validateHostSelector(request.Host); err != nil {
+				return RoutePlan{}, newRouteError("invalid_host", err.Error())
+			}
+		}
+		if sinceValue == "" {
+			return RoutePlan{}, newRouteError("missing_since", "monitoring.history requires since, and usually until")
+		}
+		return newPlan(request.Intent, RouteStep{
+			Source: SourceZabbixAPI,
+			Action: "event.get",
+			Host:   request.Host,
+			Limit:  monitoringIssueLimit,
+			Since:  sinceValue,
+			Until:  untilValue,
 		}), nil
 
 	case IntentLiveEvidence:
@@ -230,8 +266,11 @@ func (r *Router) candidateRequests(plan RoutePlan) []RouteRequest {
 	case IntentFleetInventory:
 		return []RouteRequest{{Intent: plan.Intent, Since: plan.Steps[0].Since}}
 
-	case IntentAgentStatus, IntentMonitoringProblems:
-		return []RouteRequest{{Intent: plan.Intent, Host: host, Since: plan.Steps[0].Since}}
+	case IntentAgentStatus, IntentMonitoringProblems, IntentMonitoringHistory:
+		return []RouteRequest{{
+			Intent: plan.Intent, Host: host,
+			Since: plan.Steps[0].Since, Until: plan.Steps[0].Until,
+		}}
 
 	case IntentDatabaseQuery:
 		// The query is carried verbatim in the plan rather than resolved from

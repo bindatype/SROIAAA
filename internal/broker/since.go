@@ -75,3 +75,22 @@ func bound(moment, now time.Time) (time.Time, error) {
 	}
 	return moment, nil
 }
+
+// ParseUntil closes the window ParseSince opens. It accepts the same forms and
+// treats a plain date as the end of that day rather than its start, because
+// "until May 21st" means through the 21st, not up to its first second.
+func ParseUntil(value string, ref time.Time) (time.Time, error) {
+	if value == "" {
+		return time.Time{}, nil
+	}
+	if day, err := time.Parse("2006-01-02", value); err == nil {
+		return day.AddDate(0, 0, 1).UTC(), nil
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "today":
+		return time.Date(ref.Year(), ref.Month(), ref.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1), nil
+	case "yesterday":
+		return time.Date(ref.Year(), ref.Month(), ref.Day(), 0, 0, 0, 0, time.UTC), nil
+	}
+	return ParseSince(value, ref)
+}

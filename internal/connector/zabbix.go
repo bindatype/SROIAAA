@@ -29,6 +29,10 @@ const (
 // API method.
 var zabbixMethods = map[string]string{
 	"trigger.get": "trigger.get",
+	// The event log. trigger.get reports which triggers are firing now and when
+	// each last changed state, which cannot answer what happened on a past day:
+	// 21 May had no trigger whose state last changed then, and 5011 events.
+	"event.get": "event.get",
 }
 
 // ZabbixConfig carries operator-supplied execution details. None of these are
@@ -104,6 +108,10 @@ func (c *ZabbixConnector) Execute(ctx context.Context, step broker.RouteStep) (E
 		limit = zabbixMaxLimit
 	}
 
+	if method == "event.get" {
+		return c.executeEvents(ctx, step, limit)
+	}
+
 	params := map[string]any{
 		"output":      []string{"triggerid", "description", "priority", "value", "lastchange"},
 		"selectHosts": []string{"host"},
@@ -130,6 +138,13 @@ func (c *ZabbixConnector) Execute(ctx context.Context, step broker.RouteStep) (E
 		// problems here have been firing since 2024, so the top of that list
 		// contains nothing from today.
 		params["sortfield"] = "lastchange"
+	}
+	if step.Until != "" {
+		moment, err := time.Parse(time.RFC3339, step.Until)
+		if err != nil {
+			return Evidence{}, newConnectorError("invalid_until", err.Error())
+		}
+		params["lastChangeTill"] = moment.Unix()
 	}
 
 	requestedAt := time.Now().UTC()
@@ -169,6 +184,7 @@ func (c *ZabbixConnector) Execute(ctx context.Context, step broker.RouteStep) (E
 		Action:         step.Action,
 		Endpoint:       redactEndpoint(c.endpoint),
 		Since:          step.Since,
+		Until:          step.Until,
 		RequestedAt:    requestedAt,
 		DurationMS:     time.Since(requestedAt).Milliseconds(),
 		ItemCount:      len(items),
@@ -177,6 +193,127 @@ func (c *ZabbixConnector) Execute(ctx context.Context, step broker.RouteStep) (E
 		Summary:        summary,
 		Items:          items,
 	}, nil
+}
+
+// executeEvents answers from the event log rather than current trigger state.
+func (c *ZabbixConnector) executeEvents(ctx context.Context, step broker.RouteStep, limit int) (Evidence, error) {
+	params := map[string]any{
+		"source":      0, // triggers
+		"object":      0,
+		"output":      []string{"eventid", "clock", "name", "severity", "value"},
+		"selectHosts": []string{"host"},
+		"sortfield":   "clock",
+		"sortorder":   "DESC",
+		"limit":       limit,
+	}
+	if step.Host != "" {
+		params["host"] = step.Host
+	}
+	from, till, err := windowOf(step)
+	if err != nil {
+		return Evidence{}, err
+	}
+	if !from.IsZero() {
+		params["time_from"] = from.Unix()
+	}
+	if !till.IsZero() {
+		params["time_till"] = till.Unix()
+	}
+
+	requestedAt := time.Now().UTC()
+	payload, err := c.rawCall(ctx, "event.get", params)
+	if err != nil {
+		return Evidence{}, err
+	}
+	var envelope struct {
+		Result []struct {
+			EventID  string `json:"eventid"`
+			Clock    string `json:"clock"`
+			Name     string `json:"name"`
+			Severity string `json:"severity"`
+			Value    string `json:"value"`
+			Hosts    []struct {
+				Host string `json:"host"`
+			} `json:"hosts"`
+		} `json:"result"`
+		Error *struct {
+			Message string `json:"message"`
+			Data    string `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return Evidence{}, newConnectorError("decode_response", err.Error())
+	}
+	if envelope.Error != nil {
+		return Evidence{}, newConnectorError("zabbix_error", envelope.Error.Message+": "+envelope.Error.Data)
+	}
+
+	items := make([]EvidenceItem, 0, len(envelope.Result))
+	for _, event := range envelope.Result {
+		host := ""
+		if len(event.Hosts) > 0 {
+			host = event.Hosts[0].Host
+		}
+		severity, ok := zabbixPriority[event.Severity]
+		if !ok {
+			severity = "unknown"
+		}
+		// value 1 is a problem starting, 0 is one resolving. Reporting both as
+		// "issues" would double-count an incident that opened and closed.
+		state := "resolved"
+		if event.Value == "1" {
+			state = "problem"
+		}
+		items = append(items, EvidenceItem{
+			ID:          event.EventID,
+			Host:        host,
+			Description: event.Name,
+			Severity:    severity,
+			State:       state,
+			Fields:      map[string]string{"occurred": formatEpoch(event.Clock)},
+		})
+	}
+
+	total, severities, err := c.census(ctx, "event.get", params)
+	if err != nil {
+		return Evidence{}, err
+	}
+	summary := map[string]int{"returned": len(items), "total_matching": total}
+	for severity, count := range severities {
+		summary[severity] = count
+	}
+
+	return Evidence{
+		Source:         string(broker.SourceZabbixAPI),
+		Action:         step.Action,
+		Endpoint:       redactEndpoint(c.endpoint),
+		Since:          step.Since,
+		Until:          step.Until,
+		RequestedAt:    requestedAt,
+		DurationMS:     time.Since(requestedAt).Milliseconds(),
+		ItemCount:      len(items),
+		TotalAvailable: total,
+		Truncated:      total > len(items),
+		Summary:        summary,
+		Items:          items,
+	}, nil
+}
+
+// windowOf parses the bounds a step carries.
+func windowOf(step broker.RouteStep) (time.Time, time.Time, error) {
+	var from, till time.Time
+	var err error
+	if step.Since != "" {
+		if from, err = time.Parse(time.RFC3339, step.Since); err != nil {
+			return from, till, newConnectorError("invalid_since", err.Error())
+		}
+	}
+	if step.Until != "" {
+		if till, err = time.Parse(time.RFC3339, step.Until); err != nil {
+			return from, till, newConnectorError("invalid_until", err.Error())
+		}
+	}
+	return from, till, nil
 }
 
 // census asks how many rows match the same filters, and how they break down by
@@ -196,7 +333,11 @@ func (c *ZabbixConnector) census(ctx context.Context, method string, params map[
 		}
 		censusParams[key] = value
 	}
-	censusParams["output"] = []string{"priority"}
+	if method == "event.get" {
+		censusParams["output"] = []string{"severity"}
+	} else {
+		censusParams["output"] = []string{"priority"}
+	}
 	censusParams["limit"] = maxCensusRows
 
 	payload, err := c.rawCall(ctx, method, censusParams)
@@ -206,6 +347,7 @@ func (c *ZabbixConnector) census(ctx context.Context, method string, params map[
 	var envelope struct {
 		Result []struct {
 			Priority string `json:"priority"`
+			Severity string `json:"severity"`
 		} `json:"result"`
 		Error *struct {
 			Message string `json:"message"`
@@ -221,7 +363,11 @@ func (c *ZabbixConnector) census(ctx context.Context, method string, params map[
 
 	counts := make(map[string]int, 6)
 	for _, row := range envelope.Result {
-		severity, ok := zabbixPriority[row.Priority]
+		level := row.Priority
+		if level == "" {
+			level = row.Severity
+		}
+		severity, ok := zabbixPriority[level]
 		if !ok {
 			severity = "unknown"
 		}

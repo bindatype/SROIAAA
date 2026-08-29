@@ -8,6 +8,7 @@ const (
 	IntentMonitoringProblems Intent = "monitoring.problems"
 	IntentLiveEvidence       Intent = "live.evidence"
 	IntentDatabaseQuery      Intent = "database.query"
+	IntentMonitoringHistory  Intent = "monitoring.history"
 )
 
 type Source string
@@ -32,6 +33,8 @@ func SourceForIntent(intent Intent) (Source, bool) {
 		return SourceSROIAAA, true
 	case IntentDatabaseQuery:
 		return SourcePegasusDB, true
+	case IntentMonitoringHistory:
+		return SourceZabbixAPI, true
 	default:
 		return "", false
 	}
@@ -45,6 +48,7 @@ func AllIntents() []Intent {
 		IntentMonitoringProblems,
 		IntentLiveEvidence,
 		IntentDatabaseQuery,
+		IntentMonitoringHistory,
 	}
 }
 
@@ -64,6 +68,10 @@ type RouteRequest struct {
 	// question answered from unfiltered data is wrong in the direction that
 	// looks right.
 	Since string `json:"since,omitempty"`
+	// Until closes the window Since opens. Without it a bound is a ray: asking
+	// for issues "on May 21st" with only a lower bound returned everything from
+	// May to now, sorted by recency, so the answer described today.
+	Until string `json:"until,omitempty"`
 }
 
 type RoutePlan struct {
@@ -80,6 +88,7 @@ type RouteStep struct {
 	Operation string           `json:"operation,omitempty"`
 	Query     string           `json:"query,omitempty"`
 	Since     string           `json:"since,omitempty"`
+	Until     string           `json:"until,omitempty"`
 	Target    *OperationTarget `json:"target,omitempty"`
 	Params    *OperationParams `json:"params,omitempty"`
 }

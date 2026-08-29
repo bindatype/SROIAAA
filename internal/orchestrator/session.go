@@ -98,6 +98,11 @@ func ToolDefinition(intents []string) any {
 						"type":        "string",
 						"description": "The SQL for database.query, and the only field SQL may go in. One read-only SELECT, bounded by WHERE.",
 					},
+					"until": map[string]any{
+						"type": "string",
+						"description": "Close the window since opens. Same forms; a plain date means the end of that day. " +
+							"Without it a bound is a ray, and a question about one past day is answered from today.",
+					},
 					"since": map[string]any{
 						"type": "string",
 						"description": "Bound evidence to what changed after this moment. RFC 3339, a date such as 2026-08-28, " +
