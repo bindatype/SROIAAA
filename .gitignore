@@ -6,3 +6,12 @@ dist/
 *.log
 !testdata/varlog/system.log
 *.out
+
+# Binaries a bare `go build ./cmd/...` drops in the repo root. The scripts here
+# build into runtime/, but an ad-hoc build does not, and `git add -A` will
+# happily commit 8MB of it.
+/sroiaaa-agent
+/sroiaaa-broker-exec
+/sroiaaa-broker-plan
+/sroiaaa-chat
+/sroiaaa-notify
