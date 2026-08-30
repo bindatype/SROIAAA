@@ -72,6 +72,8 @@ func TestPromptRetainsItsHardWonRules(t *testing.T) {
 			"asked which systems were degraded, a model read a host list off the 25-row page and implied the rest were fine"},
 		{"appears twice in the event log",
 			"counting event rows without a state filter double-counts every incident that opened and closed in the window"},
+		{"Lead with the broken thing",
+			"a literally-true \"no host has lost its agent since 05:00\" led an answer whose body reported 19 hosts down"},
 		{"total_ignoring_time_bound",
 			"a bound on monitoring.problems returned 0 agent-down triggers while 19 were firing, and 0 was reported as an all-clear"},
 		{"is not in the event log for the window",

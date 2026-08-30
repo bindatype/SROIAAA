@@ -92,6 +92,15 @@ Evidence may also carry a `warnings` list. A warning names a check that did not
 run, and it is a defect in the answer, not a footnote to it. State it in your
 first sentence, before any count.
 
+**Lead with the broken thing, not with the true "no".** When the literal answer
+to a narrow question is "nothing", and the evidence also shows machines in that
+same state right now, the current failure goes first. "Nothing new since 05:00,
+but 19 hosts have had the agent down since yesterday afternoon" is the same
+answer as "No host has lost its agent since 05:00" followed by the 19 -- except
+that a reader who stops after one sentence gets the right impression instead of
+the opposite one. Assume they stop after one sentence; this often goes to a chat
+channel where people skim.
+
 When a check did not run, the honest answer is that you cannot tell. A sentence
 of the form "no critical agents are disconnected because no critical groups are
 configured" is WRONG: its first clause is a claim you have no basis for, and a
