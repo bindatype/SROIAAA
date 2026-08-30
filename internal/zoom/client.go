@@ -50,8 +50,11 @@ const formatMessage = "message"
 // pin down: what "input message" means in the signature string, and whether
 // base64UrlEncode means the URL-safe alphabet or the standard one.
 //
-// Rather than guess twice, Probe sends one message per variant and reports
-// which the server accepts. Once known for an account, it does not change.
+// Both were settled against the live endpoint on 2026-08-30: "input message"
+// is the exact body POSTed, quotes included, and base64UrlEncode means the
+// standard alphabet. The other three constructions returned 401 "Invalid
+// signature". Probe remains because that measurement is one account on one
+// day, and a 401 is otherwise indistinguishable from a bad secret.
 type Variant struct {
 	Name string
 	// HashRawBody hashes the exact bytes POSTed, which for format=message
@@ -70,8 +73,10 @@ var Variants = []Variant{
 	{Name: "plain-text/urlsafe", HashRawBody: false, URLSafe: true},
 }
 
-// DefaultVariant is used unless SROIAAA_ZOOM_SIGNATURE_VARIANT names another.
-// Replace this with whatever Probe reports, and delete the rest.
+// DefaultVariant is the construction Zoom accepted on 2026-08-30. Override it
+// with SROIAAA_ZOOM_SIGNATURE_VARIANT rather than editing here, and rerun
+// -probe before changing it: the other three are not near-misses, they are
+// rejected outright.
 var DefaultVariant = Variants[0]
 
 type Config struct {

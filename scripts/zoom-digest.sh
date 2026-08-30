@@ -7,6 +7,11 @@
 # From cron, source the environment first; cron gets almost none of it:
 #   0 7 * * 1-5 . $HOME/.config/sroiaaa/env && sh $HOME/sroiaaa/scripts/zoom-digest.sh
 #
+# The signature construction Zoom accepts was confirmed on 2026-08-30 and is
+# the built-in default, so SROIAAA_ZOOM_SIGNATURE_VARIANT need not be set. If
+# posting starts returning 401, run  sroiaaa-notify -probe  before assuming
+# the secret is wrong.
+#
 # Read-only throughout. Nothing here modifies any system.
 set -eu
 
