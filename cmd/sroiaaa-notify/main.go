@@ -28,6 +28,9 @@ const (
 	urlEnv    = "SROIAAA_ZOOM_WEBHOOK_URL"
 	tokenEnv  = "SROIAAA_ZOOM_WEBHOOK_TOKEN"
 	secretEnv = "SROIAAA_ZOOM_WEBHOOK_SECRET"
+	// variantEnv pins the signature construction once -probe has identified it,
+	// without a rebuild.
+	variantEnv = "SROIAAA_ZOOM_SIGNATURE_VARIANT"
 
 	// maxInput bounds what will be read from a pipe. An answer is a paragraph;
 	// anything approaching this size means the upstream command failed in a way
@@ -43,10 +46,15 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("sroiaaa-notify", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	title := flags.String("title", "", "optional bold first line")
-	dryRun := flags.Bool("dry-run", false, "print the exact payload instead of posting")
+	dryRun := flags.Bool("dry-run", false, "print the exact request instead of sending it")
+	probe := flags.Bool("probe", false, "send one test message per signature variant and report which Zoom accepts")
 	timeout := flags.Duration("timeout", 30*time.Second, "overall timeout")
 	if err := flags.Parse(args); err != nil {
 		return 2
+	}
+
+	if *probe {
+		return runProbe(stdout, stderr, *timeout)
 	}
 
 	raw, err := io.ReadAll(io.LimitReader(stdin, maxInput))
@@ -65,24 +73,20 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		text = "**" + *title + "**\n" + text
 	}
 
+	client, err := newClient()
+	if err != nil {
+		fmt.Fprintf(stderr, "sroiaaa-notify: %v (set %s and %s)\n", err, urlEnv, secretEnv)
+		return 2
+	}
+
 	if *dryRun {
-		payload, err := zoom.Payload(text)
+		described, err := client.Describe(text)
 		if err != nil {
 			fmt.Fprintf(stderr, "sroiaaa-notify: %v\n", err)
 			return 1
 		}
-		fmt.Fprintln(stdout, string(payload))
+		fmt.Fprint(stdout, described)
 		return 0
-	}
-
-	client, err := zoom.New(zoom.Config{
-		URL:    os.Getenv(urlEnv),
-		Token:  os.Getenv(tokenEnv),
-		Secret: os.Getenv(secretEnv),
-	})
-	if err != nil {
-		fmt.Fprintf(stderr, "sroiaaa-notify: %v (set %s and %s)\n", err, urlEnv, secretEnv)
-		return 2
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -90,6 +94,73 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if err := client.Post(ctx, text); err != nil {
 		fmt.Fprintf(stderr, "sroiaaa-notify: %v\n", err)
 		return 1
+	}
+	return 0
+}
+
+func newClient() (*zoom.Client, error) {
+	variant, err := zoom.VariantByName(os.Getenv(variantEnv))
+	if err != nil {
+		return nil, err
+	}
+	return zoom.New(zoom.Config{
+		URL:     os.Getenv(urlEnv),
+		Token:   os.Getenv(tokenEnv),
+		Secret:  os.Getenv(secretEnv),
+		Variant: variant,
+	})
+}
+
+// runProbe settles the two things Zoom's documentation states without pinning
+// down: what "input message" covers, and which base64 alphabet it means. Each
+// distinct signature costs one visible message in the channel, which is why
+// this is a flag rather than something Post does on failure.
+func runProbe(stdout, stderr io.Writer, timeout time.Duration) int {
+	client, err := newClient()
+	if err != nil {
+		fmt.Fprintf(stderr, "sroiaaa-notify: %v\n", err)
+		return 2
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout*time.Duration(len(zoom.Variants)))
+	defer cancel()
+
+	results, err := client.Probe(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "sroiaaa-notify: %v\n", err)
+		return 2
+	}
+
+	fmt.Fprintf(stdout, "Sent %d test message(s), one per distinct signature.\n\n", len(results))
+	var accepted []zoom.ProbeResult
+	for _, result := range results {
+		names := strings.Join(result.Variants, ", ")
+		if len(result.Variants) > 1 {
+			// Not a failure: these constructions produce identical bytes for
+			// this payload, so one request tested them all.
+			names += "  (identical for this payload)"
+		}
+		if result.Accepted {
+			fmt.Fprintf(stdout, "  ACCEPTED  %s\n", names)
+			accepted = append(accepted, result)
+			continue
+		}
+		fmt.Fprintf(stdout, "  rejected  %s\n            %v\n", names, result.Err)
+	}
+
+	switch len(accepted) {
+	case 0:
+		fmt.Fprintln(stdout, "\nNone accepted. The problem is not the signature construction.")
+		return 1
+	case 1:
+		fmt.Fprintf(stdout, "\nUse: export %s=%s\n", variantEnv, accepted[0].Variants[0])
+		if len(accepted[0].Variants) > 1 {
+			fmt.Fprintf(stdout, "(%s is equivalent here, but may not be for every message.)\n",
+				strings.Join(accepted[0].Variants[1:], ", "))
+		}
+	default:
+		// Genuinely alarming: distinct signatures both accepted means the
+		// server is not checking the one we send.
+		fmt.Fprintf(stdout, "\n%d DIFFERENT signatures were accepted. The endpoint is not verifying them.\n", len(accepted))
 	}
 	return 0
 }

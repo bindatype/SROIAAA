@@ -5,9 +5,19 @@
 // an "incoming webhook" is incoming to Zoom, so this package sends and never
 // receives. Reading questions out of a channel needs a Zoom Marketplace app
 // with a Team Chat bot, which is a different credential, a different endpoint,
-// and an inbound path from Zoom's cloud to a host we run. Nothing here gets us
-// closer to that; it is deliberately the half that needs no inbound firewall
-// change.
+// and an inbound path from Zoom's cloud to a host we run.
+//
+// The wire contract is documented at
+// https://support.zoom.com/hc/en/article?id=zm_kb&sysparm_article=KB0067640
+// and is easy to get wrong in ways that produce a bare 400:
+//
+//   - The timestamp is a QUERY PARAMETER in MILLISECONDS, not a header. A
+//     timestamp sent as a header returns "400 Bad Request: Missed timestamp".
+//   - The signature covers "{format}&{timestamp}&{message}", not the body
+//     alone, and is base64 rather than hex.
+//   - Authorization carries the bare signature, with no scheme prefix.
+//   - For format=message the body is a JSON string literal, "like this", not
+//     an object.
 package zoom
 
 import (
@@ -15,11 +25,12 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/hex"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -31,9 +42,38 @@ import (
 // split here instead.
 const maxMessageBytes = 3500
 
-// Config carries the values printed by the /inc connect command in the target
-// channel. Exactly one of Token or Secret is used, depending on which form of
-// the command created the connection.
+// formatMessage is the simplest of Zoom's body formats (message, fields, list,
+// full, upload, img). It carries plain text, which is all a digest needs.
+const formatMessage = "message"
+
+// Variant captures the two things Zoom's documentation states but does not
+// pin down: what "input message" means in the signature string, and whether
+// base64UrlEncode means the URL-safe alphabet or the standard one.
+//
+// Rather than guess twice, Probe sends one message per variant and reports
+// which the server accepts. Once known for an account, it does not change.
+type Variant struct {
+	Name string
+	// HashRawBody hashes the exact bytes POSTed, which for format=message
+	// includes the surrounding JSON quotes. When false, the unquoted text is
+	// hashed instead.
+	HashRawBody bool
+	URLSafe     bool
+}
+
+// Variants are ordered by how likely each is to be the real contract. Signing
+// the bytes actually sent is the ordinary convention, so it leads.
+var Variants = []Variant{
+	{Name: "raw-body/standard", HashRawBody: true, URLSafe: false},
+	{Name: "raw-body/urlsafe", HashRawBody: true, URLSafe: true},
+	{Name: "plain-text/standard", HashRawBody: false, URLSafe: false},
+	{Name: "plain-text/urlsafe", HashRawBody: false, URLSafe: true},
+}
+
+// DefaultVariant is used unless SROIAAA_ZOOM_SIGNATURE_VARIANT names another.
+// Replace this with whatever Probe reports, and delete the rest.
+var DefaultVariant = Variants[0]
+
 type Config struct {
 	// URL is the endpoint /inc connect returned. It encodes which channel the
 	// message lands in, so it is as sensitive as the credential beside it.
@@ -41,18 +81,22 @@ type Config struct {
 	// Token authenticates a connection made with "/inc connect".
 	Token string
 	// Secret authenticates a connection made with "/inc connect -s", by signing
-	// each payload rather than transmitting a shared static string. Prefer it.
+	// each payload rather than sending a shared static string. Prefer it.
 	Secret string
+	// Variant selects the signature construction. Zero value means
+	// DefaultVariant.
+	Variant *Variant
 
 	HTTPClient *http.Client
 }
 
 type Client struct {
-	url    string
-	token  string
-	secret string
-	http   *http.Client
-	now    func() time.Time
+	url     string
+	token   string
+	secret  string
+	variant Variant
+	http    *http.Client
+	now     func() time.Time
 }
 
 func New(cfg Config) (*Client, error) {
@@ -60,30 +104,37 @@ func New(cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("zoom: webhook URL is empty")
 	}
 	if !strings.HasPrefix(cfg.URL, "https://") {
-		// The credential travels in a header on every call. Over plain HTTP it
-		// travels in clear text to whoever is between here and Zoom.
+		// The credential travels on every call. Over plain HTTP it travels in
+		// clear text to whoever is between here and Zoom.
 		return nil, fmt.Errorf("zoom: webhook URL must be https")
+	}
+	if _, err := url.Parse(cfg.URL); err != nil {
+		return nil, fmt.Errorf("zoom: webhook URL is not a URL: %w", err)
 	}
 	if cfg.Token == "" && cfg.Secret == "" {
 		return nil, fmt.Errorf("zoom: set either a token or a signing secret")
+	}
+	variant := DefaultVariant
+	if cfg.Variant != nil {
+		variant = *cfg.Variant
 	}
 	client := cfg.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
 	return &Client{
-		url:    cfg.URL,
-		token:  cfg.Token,
-		secret: cfg.Secret,
-		http:   client,
-		now:    time.Now,
+		url:     cfg.URL,
+		token:   cfg.Token,
+		secret:  cfg.Secret,
+		variant: variant,
+		http:    client,
+		now:     time.Now,
 	}, nil
 }
 
 // Post sends text to the channel, splitting it when it exceeds what Zoom will
-// accept in one message. A split is reported in order, and the first failure
-// stops the rest: a partial digest that announces itself as partial is better
-// than one that silently ends mid-sentence.
+// accept in one message. The first failure stops the rest: a partial digest
+// that says it is partial beats one that ends mid-sentence.
 func (c *Client) Post(ctx context.Context, text string) error {
 	chunks := split(text, maxMessageBytes)
 	if len(chunks) == 0 {
@@ -104,16 +155,38 @@ func (c *Client) Post(ctx context.Context, text string) error {
 }
 
 func (c *Client) postOne(ctx context.Context, text string) error {
-	payload, err := Payload(text)
+	// Zoom expects milliseconds here and rejects a signature whose timestamp is
+	// more than half an hour old.
+	return c.postAt(ctx, text, strconv.FormatInt(c.now().UnixMilli(), 10))
+}
+
+func (c *Client) postAt(ctx context.Context, text, timestamp string) error {
+	body, err := json.Marshal(text)
 	if err != nil {
-		return err
+		return fmt.Errorf("zoom: encode message: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(payload))
+
+	endpoint, err := url.Parse(c.url)
+	if err != nil {
+		return fmt.Errorf("zoom: parse URL: %w", err)
+	}
+	query := endpoint.Query()
+	query.Set("format", formatMessage)
+	if c.secret != "" {
+		query.Set("timestamp", timestamp)
+	}
+	endpoint.RawQuery = query.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("zoom: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	c.authorize(req, payload)
+	if c.secret != "" {
+		req.Header.Set("Authorization", Sign(c.secret, formatMessage, timestamp, text, body, c.variant))
+	} else {
+		req.Header.Set("Authorization", c.token)
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -121,42 +194,89 @@ func (c *Client) postOne(ctx context.Context, text string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Zoom explains a rejected payload in the body, and that explanation is
-		// the whole diagnostic when a format or credential is wrong.
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("zoom: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		// Zoom names the offending field in the body, and that name is the whole
+		// diagnostic: "Missed timestamp" is what a header-borne timestamp gets.
+		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("zoom: %s: %s", resp.Status, strings.TrimSpace(string(detail)))
 	}
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	return nil
 }
 
-// authorize applies whichever scheme the connection was created with.
+// Sign builds the Authorization value:
 //
-// The signed form follows Zoom's documented v0 construction: a timestamp
-// header, and an HMAC-SHA256 over "v0:{timestamp}:{body}" keyed by the secret.
-// Confirm the header names against what /inc connect -s prints for this
-// account before trusting it in production; if they differ it is this function
-// and nothing else that changes.
-func (c *Client) authorize(req *http.Request, payload []byte) {
-	if c.secret == "" {
-		req.Header.Set("Authorization", c.token)
-		return
+//	base64(HMAC-SHA256("{format}&{timestamp}&{message}", secret))
+//
+// with no scheme prefix. It takes both the plain text and the encoded body so
+// that a Variant can select which one Zoom means by "input message".
+func Sign(secret, format, timestamp, text string, body []byte, v Variant) string {
+	message := text
+	if v.HashRawBody {
+		message = string(body)
 	}
-	timestamp := strconv.FormatInt(c.now().Unix(), 10)
-	mac := hmac.New(sha256.New, []byte(c.secret))
-	fmt.Fprintf(mac, "v0:%s:%s", timestamp, payload)
-	req.Header.Set("X-Zm-Request-Timestamp", timestamp)
-	req.Header.Set("Authorization", "v0="+hex.EncodeToString(mac.Sum(nil)))
+	mac := hmac.New(sha256.New, []byte(secret))
+	io.WriteString(mac, format+"&"+timestamp+"&"+message)
+	sum := mac.Sum(nil)
+	if v.URLSafe {
+		return base64.URLEncoding.EncodeToString(sum)
+	}
+	return base64.StdEncoding.EncodeToString(sum)
 }
 
-// Payload renders the message body Zoom expects. It is exported so that a
-// dry run can show the exact bytes that would go over the wire, which is how
-// the format gets confirmed without a live connection.
-func Payload(text string) ([]byte, error) {
-	return json.Marshal(struct {
-		Markdown bool   `json:"is_markdown_support"`
-		Content  string `json:"content"`
-	}{Markdown: true, Content: text})
+// ProbeResult reports one distinct request the probe sent. Variants that
+// produce byte-identical signatures are grouped, because sending the same
+// request twice would waste a message and prove nothing.
+type ProbeResult struct {
+	Variants []string
+	Accepted bool
+	Err      error
+}
+
+// Probe settles the two things Zoom's documentation states without pinning
+// down: what "input message" covers in the signature string, and which base64
+// alphabet base64UrlEncode means.
+//
+// The text and timestamp are held fixed across variants so that the only thing
+// varying is the signature construction. Standard and URL-safe base64 differ
+// only when the digest contains a byte encoding to '+' or '/', which is why
+// variants are grouped by the signature they actually produce rather than
+// assumed distinct: without that, two constructions can both look accepted
+// when only one request was ever really tried.
+func (c *Client) Probe(ctx context.Context) ([]ProbeResult, error) {
+	if c.secret == "" {
+		return nil, fmt.Errorf("zoom: probe needs a signing secret")
+	}
+	text := "sroiaaa signature probe"
+	timestamp := strconv.FormatInt(c.now().UnixMilli(), 10)
+	body, err := json.Marshal(text)
+	if err != nil {
+		return nil, err
+	}
+
+	var results []ProbeResult
+	index := map[string]int{}
+	for _, variant := range Variants {
+		signature := Sign(c.secret, formatMessage, timestamp, text, body, variant)
+		if at, seen := index[signature]; seen {
+			results[at].Variants = append(results[at].Variants, variant.Name)
+			continue
+		}
+		index[signature] = len(results)
+		results = append(results, ProbeResult{Variants: []string{variant.Name}})
+	}
+
+	for i := range results {
+		attempt := *c
+		if v, err := VariantByName(results[i].Variants[0]); err == nil && v != nil {
+			attempt.variant = *v
+		}
+		if err := attempt.postAt(ctx, text, timestamp); err != nil {
+			results[i].Err = err
+			continue
+		}
+		results[i].Accepted = true
+	}
+	return results, nil
 }
 
 // split breaks text into chunks no larger than limit bytes, preferring a line
@@ -192,4 +312,60 @@ func split(text string, limit int) []string {
 	}
 	flush()
 	return chunks
+}
+
+// VariantByName resolves an override, so a confirmed variant can be selected
+// without a rebuild.
+func VariantByName(name string) (*Variant, error) {
+	if name == "" {
+		return nil, nil
+	}
+	for i := range Variants {
+		if Variants[i].Name == name {
+			return &Variants[i], nil
+		}
+	}
+	names := make([]string, 0, len(Variants))
+	for _, v := range Variants {
+		names = append(names, v.Name)
+	}
+	return nil, fmt.Errorf("zoom: unknown signature variant %q (have %s)", name, strings.Join(names, ", "))
+}
+
+// Describe renders the request Post would send, without sending it. A dry run
+// that shows the real query string, headers, and body is how a wire-format
+// problem gets diagnosed without spending a message in a channel.
+func (c *Client) Describe(text string) (string, error) {
+	timestamp := strconv.FormatInt(c.now().UnixMilli(), 10)
+	body, err := json.Marshal(text)
+	if err != nil {
+		return "", err
+	}
+	endpoint, err := url.Parse(c.url)
+	if err != nil {
+		return "", err
+	}
+	query := endpoint.Query()
+	query.Set("format", formatMessage)
+	authorization := c.token
+	if c.secret != "" {
+		query.Set("timestamp", timestamp)
+		authorization = Sign(c.secret, formatMessage, timestamp, text, body, c.variant)
+	}
+	endpoint.RawQuery = query.Encode()
+
+	var out strings.Builder
+	fmt.Fprintf(&out, "POST %s\n", endpoint.String())
+	fmt.Fprintf(&out, "Content-Type: application/json\n")
+	fmt.Fprintf(&out, "Authorization: %s\n", authorization)
+	if c.secret != "" {
+		fmt.Fprintf(&out, "\nsigned as: %s\n", c.variant.Name)
+		signed := text
+		if c.variant.HashRawBody {
+			signed = string(body)
+		}
+		fmt.Fprintf(&out, "signature covers: %s&%s&%s\n", formatMessage, timestamp, signed)
+	}
+	fmt.Fprintf(&out, "\n%s\n", body)
+	return out.String(), nil
 }
