@@ -190,6 +190,7 @@ MariaDB 10.3 window-function rules:
 Examples:
 
 ```sql
+-- one number: MEDIAN needs OVER, and LIMIT 1 collapses the repeated rows
 SELECT ROUND(MEDIAN(StartTime - SubmitTime) OVER ()/3600, 2) AS p50_wait_hr
 FROM runTBL2
 WHERE SubmitTime >= UNIX_TIMESTAMP(NOW() - INTERVAL 14 DAY)
@@ -199,6 +200,7 @@ LIMIT 1;
 ```
 
 ```sql
+-- per group: note DISTINCT with OVER (PARTITION BY ...), not GROUP BY
 SELECT DISTINCT `partition`,
        ROUND(MEDIAN(StartTime - SubmitTime) OVER (PARTITION BY `partition`)/3600, 2) AS p50_wait_hr
 FROM runTBL2
@@ -208,6 +210,7 @@ WHERE SubmitTime >= UNIX_TIMESTAMP(NOW() - INTERVAL 14 DAY)
 ```
 
 ```sql
+-- an ordinary aggregate: GROUP BY is correct when no window function is involved
 SELECT DATE(FROM_UNIXTIME(SubmitTime)) AS day,
        COUNT(*) AS jobs
 FROM runTBL2
@@ -225,6 +228,7 @@ Partial-result rules:
 - If `total_matching > returned`, the result is partial.
 - If the evidence is marked truncated, it is partial.
 - Never describe the whole population from a partial row sample.
+- A grouped result is where this hides. `MEDIAN(x) OVER (PARTITION BY netid)` returns one row per group, every row well formed and every row carrying a different value, so losing half the groups leaves no visible trace: nothing looks wrong, no row is malformed, and the rows you can see are all correct. Only `total_matching` tells you. Compare it against `returned` before summarizing any grouped result.
 - When a result is partial, push the work into SQL with aggregation, ranking, limits, or distribution functions so the database returns the actual answer.
 
 Count rules:
