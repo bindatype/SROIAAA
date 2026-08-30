@@ -23,10 +23,14 @@ const (
 	wazuhEndpointEnv      = "SROIAAA_WAZUH_ENDPOINT"
 	wazuhUsernameEnv      = "WAZUH_API_USERNAME"
 	wazuhPasswordEnv      = "WAZUH_API_PASSWORD"
-	pegasusDSNEnv         = "SROIAAA_PEGASUS_DSN"
-	pegasusMaxRowsEnv     = "SROIAAA_PEGASUS_MAX_ROWS"
-	pegasusMaxBytesEnv    = "SROIAAA_PEGASUS_MAX_BYTES"
-	auditPathEnv          = "SROIAAA_BROKER_AUDIT"
+	// wazuhCriticalGroupsEnv names the agent groups whose loss is escalated, as
+	// a comma-separated list. Site configuration, so it lives here rather than
+	// in the connector: at RTS it is "RTS_Ops,Viper".
+	wazuhCriticalGroupsEnv = "SROIAAA_WAZUH_CRITICAL_GROUPS"
+	pegasusDSNEnv          = "SROIAAA_PEGASUS_DSN"
+	pegasusMaxRowsEnv      = "SROIAAA_PEGASUS_MAX_ROWS"
+	pegasusMaxBytesEnv     = "SROIAAA_PEGASUS_MAX_BYTES"
+	auditPathEnv           = "SROIAAA_BROKER_AUDIT"
 
 	// defaultModel is chosen by scripts/eval_headtohead.py, which grades six
 	// question shapes rather than one: an aggregate, a grouped result that
@@ -172,6 +176,7 @@ func buildSession(policyPath, model, endpoint, zabbixEndpoint, wazuhEndpoint str
 			Username:           os.Getenv(wazuhUsernameEnv),
 			Password:           os.Getenv(wazuhPasswordEnv),
 			InsecureSkipVerify: wazuhInsecure,
+			CriticalGroups:     splitList(os.Getenv(wazuhCriticalGroupsEnv)),
 		})
 		if err != nil {
 			return nil, err
@@ -223,4 +228,17 @@ func pegasusMaxBytes() int {
 		return 0
 	}
 	return size
+}
+
+// splitList parses a comma-separated environment value, discarding blanks so a
+// trailing comma or a stray space does not become a group name that matches
+// nothing.
+func splitList(value string) []string {
+	var out []string
+	for _, part := range strings.Split(value, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }

@@ -21,7 +21,7 @@ const (
 	wazuhMaxResponseBytes = 1 << 21
 	wazuhMaxLimit         = 500
 	wazuhTokenTTL         = 10 * time.Minute
-	wazuhAgentFields      = "id,name,ip,status,version,lastKeepAlive"
+	wazuhAgentFields      = "id,name,ip,status,version,lastKeepAlive,group"
 	// managerAgentID is the Wazuh manager's own entry. GET /agents includes it;
 	// the manager's own summary endpoint does not. Excluding it from aggregate
 	// counts keeps our numbers equal to what the Wazuh dashboard reports.
@@ -47,6 +47,17 @@ type WazuhConfig struct {
 	// a self-signed certificate, so this is required in practice there, but it
 	// is never the default: an operator must opt in deliberately.
 	InsecureSkipVerify bool
+	// CriticalGroups names the agent groups whose loss is worth escalating, and
+	// is site configuration rather than a property of Wazuh: at RTS these are
+	// RTS_Ops and Viper. When set, the evidence summary carries a count of
+	// agents that are both disconnected and in one of these groups.
+	//
+	// The count is computed here rather than left to a model, for the same
+	// reason every other aggregate is. Deciding which of several hundred agents
+	// are both down and in a named group is arithmetic over a list, and a model
+	// asked to do that gets it wrong occasionally and states the wrong number
+	// with confidence.
+	CriticalGroups []string
 }
 
 // WazuhConnector executes wazuh-api route steps against the manager plane.
@@ -60,6 +71,8 @@ type WazuhConnector struct {
 	password         string
 	maxResponseBytes int64
 	client           *http.Client
+
+	criticalGroups map[string]struct{}
 
 	mu        sync.Mutex
 	token     string
@@ -99,12 +112,23 @@ func NewWazuhConnector(config WazuhConfig) (*WazuhConnector, error) {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 
+	critical := make(map[string]struct{}, len(config.CriticalGroups))
+	for _, group := range config.CriticalGroups {
+		if group = strings.TrimSpace(group); group != "" {
+			// Wazuh group names are case sensitive: "RTS_Ops" and "rts_ops" are
+			// not the same group, and a silently non-matching name would report
+			// zero critical agents rather than an error.
+			critical[group] = struct{}{}
+		}
+	}
+
 	return &WazuhConnector{
 		endpoint:         strings.TrimRight(config.Endpoint, "/"),
 		username:         config.Username,
 		password:         config.Password,
 		maxResponseBytes: maxBytes,
 		client:           &http.Client{Timeout: timeout, Transport: transport},
+		criticalGroups:   critical,
 	}, nil
 }
 
@@ -153,7 +177,7 @@ func (c *WazuhConnector) Execute(ctx context.Context, step broker.RouteStep) (Ev
 		return Evidence{}, err
 	}
 
-	items := normalizeAgents(payload.Data.AffectedItems)
+	items := normalizeAgents(payload.Data.AffectedItems, c.criticalGroups)
 	return Evidence{
 		Source:         string(broker.SourceWazuhAPI),
 		Action:         step.Action,
@@ -164,7 +188,7 @@ func (c *WazuhConnector) Execute(ctx context.Context, step broker.RouteStep) (Ev
 		ItemCount:      len(items),
 		TotalAvailable: payload.Data.TotalAffectedItems,
 		Truncated:      payload.Data.TotalAffectedItems > len(items),
-		Summary:        summarizeAgents(payload.Data.AffectedItems),
+		Summary:        summarizeAgents(payload.Data.AffectedItems, c.criticalGroups),
 		Items:          items,
 	}, nil
 }
@@ -177,6 +201,20 @@ type wazuhAgent struct {
 	Status        string `json:"status"`
 	Version       string `json:"version"`
 	LastKeepAlive string `json:"lastKeepAlive"`
+	// Group is every group the agent belongs to. Wazuh returns an array, and an
+	// agent is routinely in several: "default,RTS_Ops" is the common shape.
+	Group []string `json:"group"`
+}
+
+// isCritical reports whether the agent belongs to any group an operator has
+// designated critical.
+func (a wazuhAgent) isCritical(critical map[string]struct{}) bool {
+	for _, group := range a.Group {
+		if _, found := critical[group]; found {
+			return true
+		}
+	}
+	return false
 }
 
 type wazuhEnvelope struct {
@@ -267,7 +305,7 @@ func (c *WazuhConnector) get(ctx context.Context, path string, query url.Values)
 	return envelope, nil
 }
 
-func normalizeAgents(agents []wazuhAgent) []EvidenceItem {
+func normalizeAgents(agents []wazuhAgent, critical map[string]struct{}) []EvidenceItem {
 	items := make([]EvidenceItem, 0, len(agents))
 	for _, agent := range agents {
 		item := EvidenceItem{
@@ -283,6 +321,14 @@ func normalizeAgents(agents []wazuhAgent) []EvidenceItem {
 		if agent.LastKeepAlive != "" {
 			fields["last_keep_alive"] = agent.LastKeepAlive
 		}
+		if len(agent.Group) > 0 {
+			fields["groups"] = strings.Join(agent.Group, ",")
+		}
+		// Marked on the item as well as counted in the summary, so an answer can
+		// name which hosts are critical without the model deciding what counts.
+		if agent.isCritical(critical) {
+			fields["critical"] = "true"
+		}
 		if len(fields) > 0 {
 			item.Fields = fields
 		}
@@ -291,10 +337,17 @@ func normalizeAgents(agents []wazuhAgent) []EvidenceItem {
 	return items
 }
 
-// summarizeAgents counts agents by connection state. The Wazuh manager's own
-// record is excluded so these totals match the manager's summary endpoint and
-// the Wazuh dashboard.
-func summarizeAgents(agents []wazuhAgent) map[string]int {
+// summarizeAgents counts agents by connection state, and separately counts the
+// ones whose loss is worth escalating. The Wazuh manager's own record is
+// excluded so these totals match the manager's summary endpoint and the Wazuh
+// dashboard.
+//
+// disconnected_critical is computed here for the same reason every aggregate
+// is: intersecting a status with membership of a named group, across several
+// hundred agents, is arithmetic over a list. A model asked to do it will
+// usually be right and occasionally be confidently wrong, and "which critical
+// machines are down" is not a number to be occasionally wrong about.
+func summarizeAgents(agents []wazuhAgent, critical map[string]struct{}) map[string]int {
 	summary := map[string]int{"total": 0}
 	for _, agent := range agents {
 		if agent.ID == managerAgentID {
@@ -306,6 +359,13 @@ func summarizeAgents(agents []wazuhAgent) map[string]int {
 		}
 		summary[state]++
 		summary["total"]++
+
+		if len(critical) > 0 && agent.isCritical(critical) {
+			summary["critical_total"]++
+			if state != "active" {
+				summary["critical_"+state]++
+			}
+		}
 	}
 	return summary
 }

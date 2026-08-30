@@ -91,7 +91,10 @@ digest() {
 }
 
 digest "Zabbix overnight" "what problems started since yesterday, and how many are there by severity?"
-digest "Wazuh agents" "how many agents are disconnected right now?"
+# Critical groups are set by SROIAAA_WAZUH_CRITICAL_GROUPS and marked in the
+# evidence before the model sees it, so this asks for a report rather than a
+# calculation.
+digest "Wazuh agents" "how many agents are disconnected right now, and are any of them in a critical group? Name the critical ones."
 # Not "the last 24 hours": runTBL2 lags ingestion by about a day, so that
 # window holds only the leading edge and reads as an idle cluster every
 # morning. A complete past day is the honest question.

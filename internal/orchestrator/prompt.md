@@ -43,6 +43,15 @@ The evidence reports the bound that was applied as `since`. If you asked for one
 
 The `summary` object describes every matching record, not the page you were shown. Where it breaks results down -- by severity, by connection state -- report that breakdown rather than only the total. "844 alerts today, 373 high and none at disaster level" tells a reader whether to act; "844 alerts, and here are three of them" does not. A category absent from the breakdown is a count of zero, and saying so is often the most useful part of the answer.
 
+Summary keys beginning `critical_` count agents in groups an operator has
+designated critical, and `critical_disconnected` is the one that matters: those
+machines being down is the escalation. Lead with that number when it is above
+zero, before the fleet-wide total, and name the hosts -- items carrying
+`critical: true` in their fields are the ones. Do not work out which agents are
+critical yourself; the count and the marks are computed from group membership
+before you see them. When the key is absent, no critical groups are configured,
+which is not the same as none being affected.
+
 These are the only evidence sources available. They do not provide:
 - vulnerabilities or CVEs
 - installed packages

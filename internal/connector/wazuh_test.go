@@ -216,7 +216,7 @@ func TestWazuhSummaryExcludesManagerAndMatchesDashboard(t *testing.T) {
 		{ID: "002", Name: "node02", Status: "disconnected"},
 		{ID: "003", Name: "node03", Status: "disconnected"},
 	}
-	summary := summarizeAgents(agents)
+	summary := summarizeAgents(agents, nil)
 
 	if summary["total"] != 3 {
 		t.Errorf("total = %d, want 3 (manager excluded)", summary["total"])
@@ -226,5 +226,68 @@ func TestWazuhSummaryExcludesManagerAndMatchesDashboard(t *testing.T) {
 	}
 	if summary["disconnected"] != 2 {
 		t.Errorf("disconnected = %d, want 2", summary["disconnected"])
+	}
+}
+
+// Which machines are both down and important is arithmetic over a list of
+// several hundred, so it is settled here rather than left to a model.
+func TestSummarizeAgentsCountsCriticalGroups(t *testing.T) {
+	critical := map[string]struct{}{"RTS_Ops": {}, "Viper": {}}
+	agents := []wazuhAgent{
+		{ID: "000", Name: "manager", Status: "active", Group: []string{"RTS_Ops"}},
+		{ID: "001", Name: "zabbixproxy01", Status: "disconnected", Group: []string{"default", "Zabbix", "RTS_Ops"}},
+		{ID: "023", Name: "lucee", Status: "disconnected", Group: []string{"default", "RTS_Ops"}},
+		{ID: "100", Name: "viper-a", Status: "disconnected", Group: []string{"Viper"}},
+		{ID: "101", Name: "viper-b", Status: "active", Group: []string{"Viper"}},
+		{ID: "200", Name: "ordinary", Status: "disconnected", Group: []string{"default"}},
+		{ID: "201", Name: "wrong-case", Status: "disconnected", Group: []string{"rts_ops"}},
+	}
+	summary := summarizeAgents(agents, critical)
+
+	if summary["disconnected"] != 5 {
+		t.Fatalf("disconnected = %d, want 5", summary["disconnected"])
+	}
+	// Three of the five: zabbixproxy01, lucee, viper-a. The ordinary agent is
+	// not in a critical group, and "rts_ops" is a different group from
+	// "RTS_Ops" because Wazuh group names are case sensitive.
+	if summary["critical_disconnected"] != 3 {
+		t.Fatalf("critical_disconnected = %d, want 3", summary["critical_disconnected"])
+	}
+	// The manager is excluded from every total, critical or not.
+	if summary["critical_total"] != 4 {
+		t.Fatalf("critical_total = %d, want 4 (manager excluded)", summary["critical_total"])
+	}
+	if summary["total"] != 6 {
+		t.Fatalf("total = %d, want 6", summary["total"])
+	}
+}
+
+// With no critical groups configured the summary must gain no keys at all,
+// rather than a set of zeroes that read as "nothing is critical".
+func TestSummarizeAgentsOmitsCriticalWhenUnconfigured(t *testing.T) {
+	agents := []wazuhAgent{{ID: "1", Status: "disconnected", Group: []string{"RTS_Ops"}}}
+	for key := range summarizeAgents(agents, nil) {
+		if strings.HasPrefix(key, "critical") {
+			t.Fatalf("unconfigured summary carries %q", key)
+		}
+	}
+}
+
+// An answer has to be able to name the critical hosts, not just count them.
+func TestNormalizeAgentsMarksCriticalItems(t *testing.T) {
+	critical := map[string]struct{}{"RTS_Ops": {}}
+	items := normalizeAgents([]wazuhAgent{
+		{ID: "023", Name: "lucee", Status: "disconnected", Group: []string{"default", "RTS_Ops"}},
+		{ID: "200", Name: "ordinary", Status: "disconnected", Group: []string{"default"}},
+	}, critical)
+
+	if items[0].Fields["critical"] != "true" {
+		t.Fatalf("lucee not marked critical: %v", items[0].Fields)
+	}
+	if items[0].Fields["groups"] != "default,RTS_Ops" {
+		t.Fatalf("groups = %q", items[0].Fields["groups"])
+	}
+	if _, marked := items[1].Fields["critical"]; marked {
+		t.Fatal("an agent outside every critical group must not be marked")
 	}
 }
