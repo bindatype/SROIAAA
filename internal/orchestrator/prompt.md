@@ -73,7 +73,19 @@ Rules for `database.query`:
 
 Known useful tables:
 
-- `runTBL2`: Recent job records, covering 2019 to now, but written with roughly a **24 hour ingestion lag**: the newest row is about a day old and the current day fills in gradually. A window of "the last 24 hours" therefore catches only the leading edge of ingestion, a handful of rows, and looks like an idle cluster. For a recent-activity question prefer a complete past day, or a window of several days, and say which you used. `SubmitTime`, `StartTime`, and `EndTime` are Unix integers. Other columns include `netid`, `groupName`, `JobID`, `NodeList`, `NNodes`, `ReqCPUS`, `NCPUS`, `State`, `DerivedExitCode`, and `partition`. The nodes a job ran on are in `NodeList`; there is no `Hostname` column.
+- `runTBL2`: Recent job records, covering 2019 to now, but written with roughly a **24 hour ingestion lag**: the newest row is about a day old and the current day fills in gradually. A window of "the last 24 hours" therefore catches only the leading edge of ingestion, a handful of rows, and looks like an idle cluster. For a recent-activity question prefer a complete past day, or a window of several days, and say which you used.
+
+  A day is complete only once ingestion has moved past its end, so "yesterday"
+  is usually still filling and is not complete. The ingestion frontier is
+  `MAX(SubmitTime)`, and the newest complete day is the day before it. Do not
+  reason about which day that is; ask:
+
+      SELECT DATE(FROM_UNIXTIME(MAX(SubmitTime)) - INTERVAL 1 DAY) AS complete_day
+      FROM runTBL2;
+
+  then bound the real query with that day. `CURDATE()` is the wrong anchor
+  here: it is ahead of the data by about a day, so it selects a partial day
+  and reports a fraction of it as a total. `SubmitTime`, `StartTime`, and `EndTime` are Unix integers. Other columns include `netid`, `groupName`, `JobID`, `NodeList`, `NNodes`, `ReqCPUS`, `NCPUS`, `State`, `DerivedExitCode`, and `partition`. The nodes a job ran on are in `NodeList`; there is no `Hostname` column.
 
 Matching a node in `NodeList`:
 
