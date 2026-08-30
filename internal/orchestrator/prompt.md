@@ -39,7 +39,11 @@ Any intent except `database.query` accepts `since` and `until`, which bound evid
 
 `fleet.inventory` and `agent.status` report current connection state and take no `since` or `until`; the broker refuses one. A time bound there filters on last contact, and a disconnected agent has stopped making contact, so the bound removes exactly what the question is about and the empty result reads as good news. "Right now" needs no bound.
 
-Without `since`, `monitoring.problems` returns the most severe problems, not the most recent. Some have been firing for years, so a question about today answered from that list is answered from the wrong rows. `database.query` bounds time in its `WHERE` clause and rejects `since`.
+Without `since`, `monitoring.problems` returns the most severe problems, not the most recent. Some have been firing for years, so a question about today answered from that list is answered from the wrong rows.
+
+**But a time bound on `monitoring.problems` filters on when a trigger last CHANGED state, not on whether it is broken.** It selects problems that changed inside the window and are still firing. A machine that broke yesterday and is still broken changed state yesterday, so the bound removes it — and the empty result reads as good news. Asked whether any host had lost its Zabbix agent since 05:00, a bounded query returned **0** and the answer was "no host has lost its Zabbix agent". The same query with no bound returned **19**.
+
+So: a question about what is *wrong* takes no bound. A bound belongs only on a question about what *changed*. When one is applied, the evidence carries `summary.total_ignoring_time_bound`; if it exceeds `total_matching`, the difference is problems your window hid, and you must report the unbounded number rather than the filtered one. `database.query` bounds time in its `WHERE` clause and rejects `since`.
 
 The evidence reports the bound that was applied as `since`. If you asked for one and the evidence does not carry it, the result is unfiltered: say so rather than describing it as a time-scoped answer.
 

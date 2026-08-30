@@ -179,6 +179,7 @@ func (c *ZabbixConnector) Execute(ctx context.Context, step broker.RouteStep) (E
 	items := normalizeTriggers(result)
 
 	summary := summarizeTriggers(items, total, severities)
+	boundedTotal := total
 	if step.Host != "" && total == 0 {
 		// Zero rows for a named host is ambiguous: the host may be healthy, or
 		// it may not exist. Reporting "no problems" for a host Zabbix has never
@@ -215,6 +216,11 @@ func (c *ZabbixConnector) Execute(ctx context.Context, step broker.RouteStep) (E
 		}
 	} else {
 		countHostsInPage(&evidence)
+	}
+	if step.Since != "" || step.Until != "" {
+		if err := c.compareAgainstNoTimeBound(ctx, &evidence, method, params, boundedTotal); err != nil {
+			return Evidence{}, err
+		}
 	}
 	return evidence, nil
 }
@@ -389,6 +395,86 @@ func applySelectors(params map[string]any, method string, step broker.RouteStep)
 			value = 0
 		}
 		params["value"] = []int{value}
+	}
+	return nil
+}
+
+// countMatching asks Zabbix how many rows match, without fetching any.
+//
+// countOutput is answered from the database and has no row ceiling of its own,
+// which is the whole reason to prefer it over counting what came back.
+func (c *ZabbixConnector) countMatching(ctx context.Context, method string, params map[string]any) (int, error) {
+	countParams := make(map[string]any, len(params)+1)
+	for key, value := range params {
+		switch key {
+		case "limit", "output", "sortfield", "sortorder", "selectHosts", "expandDescription":
+			continue
+		}
+		countParams[key] = value
+	}
+	countParams["countOutput"] = true
+
+	payload, err := c.rawCall(ctx, method, countParams)
+	if err != nil {
+		return 0, err
+	}
+	var envelope struct {
+		// Zabbix returns countOutput as a JSON string, not a number.
+		Result string `json:"result"`
+		Error  *struct {
+			Message string `json:"message"`
+			Data    string `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return 0, newConnectorError("decode_response", err.Error())
+	}
+	if envelope.Error != nil {
+		return 0, newConnectorError("zabbix_error", envelope.Error.Message+": "+envelope.Error.Data)
+	}
+	count, err := strconv.Atoi(envelope.Result)
+	if err != nil {
+		return 0, newConnectorError("decode_response", "countOutput was not a number: "+envelope.Result)
+	}
+	return count, nil
+}
+
+// compareAgainstNoTimeBound reports how many problems match once the time bound
+// is removed.
+//
+// A bound on trigger.get is applied to lastchange, so what it selects is
+// "changed state inside the window and is still firing". A problem that began
+// before the window and is still firing is excluded by it -- and its absence
+// reads as health. Asked whether any host had lost its Zabbix agent since 05:00,
+// the model bounded a current-state query to today and answered "no host has
+// lost its Zabbix agent" while 19 were down; the same query without the bound
+// returned all 19.
+//
+// This is the trap fleet.inventory refuses outright. It cannot be refused here,
+// because "what started failing today" is a real question and this is how it is
+// asked. So the comparison is computed instead: the model is told what it
+// filtered out, rather than being left to infer it from a zero.
+func (c *ZabbixConnector) compareAgainstNoTimeBound(ctx context.Context, evidence *Evidence, method string, params map[string]any, bounded int) error {
+	unbounded := make(map[string]any, len(params))
+	for key, value := range params {
+		switch key {
+		case "lastChangeSince", "lastChangeTill", "time_from", "time_till":
+			continue
+		}
+		unbounded[key] = value
+	}
+	total, err := c.countMatching(ctx, method, unbounded)
+	if err != nil {
+		return err
+	}
+	evidence.Summary["total_ignoring_time_bound"] = total
+	if total > bounded {
+		evidence.Warnings = append(evidence.Warnings, fmt.Sprintf(
+			"the time bound selects problems whose state CHANGED in the window, so it excluded %d "+
+				"problem(s) that began earlier and are still firing now; %d match the window against %d "+
+				"currently firing in total. For \"what is still broken\" ask again with no since or until, "+
+				"and never report the bounded count as the number of problems",
+			total-bounded, bounded, total))
 	}
 	return nil
 }
@@ -656,27 +742,9 @@ func (c *ZabbixConnector) exactCensus(ctx context.Context, method string, params
 		levelParams["filter"] = map[string]any{column: level}
 		levelParams["countOutput"] = true
 
-		payload, err := c.rawCall(ctx, method, levelParams)
+		count, err := c.countMatching(ctx, method, levelParams)
 		if err != nil {
 			return 0, nil, err
-		}
-		var envelope struct {
-			// Zabbix returns countOutput as a JSON string, not a number.
-			Result string `json:"result"`
-			Error  *struct {
-				Message string `json:"message"`
-				Data    string `json:"data"`
-			} `json:"error"`
-		}
-		if err := json.Unmarshal(payload, &envelope); err != nil {
-			return 0, nil, newConnectorError("decode_response", err.Error())
-		}
-		if envelope.Error != nil {
-			return 0, nil, newConnectorError("zabbix_error", envelope.Error.Message+": "+envelope.Error.Data)
-		}
-		count, err := strconv.Atoi(envelope.Result)
-		if err != nil {
-			return 0, nil, newConnectorError("decode_response", "countOutput was not a number: "+envelope.Result)
 		}
 		counts[zabbixPriority[strconv.Itoa(level)]] = count
 		total += count

@@ -693,3 +693,94 @@ func TestZabbixCountsHostsEvenWhenNothingIsTruncated(t *testing.T) {
 		t.Errorf("total_matching = %d, want 3", evidence.Summary["total_matching"])
 	}
 }
+
+func TestZabbixSaysWhatATimeBoundExcluded(t *testing.T) {
+	// A bound on trigger.get filters lastchange, so it selects problems that
+	// CHANGED state in the window. One that began earlier and is still firing
+	// falls out, and the zero reads as health: asked whether any host had lost
+	// its Zabbix agent since 05:00, the answer was "no host has" while 19 were
+	// down.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var request struct {
+			Params map[string]any `json:"params"`
+		}
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if request.Params["countOutput"] == true {
+			if _, bounded := request.Params["lastChangeSince"]; bounded {
+				t.Error("the comparison call still carries the time bound it exists to remove")
+			}
+			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":"19"}`)
+			return
+		}
+		// Both the page and the severity census come back empty under the bound.
+		io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[]}`)
+	}))
+	defer server.Close()
+
+	connector := newTestZabbix(t, server.URL)
+	evidence, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceZabbixAPI,
+		Action: "trigger.get",
+		Limit:  25,
+		Since:  "2026-08-30T04:00:00Z",
+		Match:  "Zabbix agent is not available",
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if evidence.Summary["total_matching"] != 0 {
+		t.Fatalf("the bounded query should match nothing here, got %d", evidence.Summary["total_matching"])
+	}
+	if evidence.Summary["total_ignoring_time_bound"] != 19 {
+		t.Errorf("total_ignoring_time_bound = %d, want the 19 that are firing regardless of the bound",
+			evidence.Summary["total_ignoring_time_bound"])
+	}
+	if len(evidence.Warnings) == 0 {
+		t.Fatal("an empty bounded result carried no warning, so zero reads as an all-clear")
+	}
+	joined := strings.Join(evidence.Warnings, " ")
+	if !strings.Contains(joined, "19") || !strings.Contains(joined, "still firing") {
+		t.Errorf("warning does not say what the bound hid: %q", joined)
+	}
+}
+
+func TestZabbixSkipsTheComparisonWithoutATimeBound(t *testing.T) {
+	// The comparison costs a round trip and means nothing when no bound was
+	// applied: the count it would return is the count already in hand.
+	countCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var request struct {
+			Params map[string]any `json:"params"`
+		}
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if request.Params["countOutput"] == true {
+			countCalls++
+			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":"0"}`)
+			return
+		}
+		io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[]}`)
+	}))
+	defer server.Close()
+
+	connector := newTestZabbix(t, server.URL)
+	evidence, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceZabbixAPI,
+		Action: "trigger.get",
+		Limit:  25,
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if countCalls != 0 {
+		t.Errorf("countOutput ran %d times with no time bound to compare against", countCalls)
+	}
+	if _, present := evidence.Summary["total_ignoring_time_bound"]; present {
+		t.Error("total_ignoring_time_bound appeared without a time bound, where it means nothing")
+	}
+}
