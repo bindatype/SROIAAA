@@ -535,6 +535,14 @@ func TestZabbixWarnsWhenTheHostBreakdownIsPartial(t *testing.T) {
 	if !strings.Contains(evidence.Warnings[0], "60") {
 		t.Errorf("warning does not say how many hosts were left unnamed: %q", evidence.Warnings[0])
 	}
+	// hosts_affected comes from the same capped fetch, and it is the number a
+	// reader quotes. A warning that names only the per-host counts leaves it
+	// looking exact.
+	for _, w := range evidence.Warnings {
+		if strings.Contains(w, "lower bound") && !strings.Contains(w, "hosts_affected") {
+			t.Errorf("the cap warning does not say hosts_affected is a floor too: %q", w)
+		}
+	}
 }
 
 func TestZabbixCensusIsExactWhenTheRowFetchOverflows(t *testing.T) {

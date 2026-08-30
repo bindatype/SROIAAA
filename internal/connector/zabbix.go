@@ -503,9 +503,15 @@ func (c *ZabbixConnector) attachHostBreakdown(ctx context.Context, evidence *Evi
 			maxBreakdownHosts, len(counts)))
 	}
 	if examined >= maxHostCensusRows && total > examined {
+		// hosts_affected is derived from the same capped fetch, so it is a
+		// floor too. Naming only the per-host counts here left the more
+		// quotable number looking exact: "29 hosts affected" is the sentence a
+		// reader repeats, and a host whose only rows fell outside the window is
+		// missing from it entirely.
 		evidence.Warnings = append(evidence.Warnings, fmt.Sprintf(
-			"events_by_host covers the most recent %d rows, not all %d that matched; "+
-				"the per-host counts are a lower bound, so do not present them as totals",
+			"events_by_host and hosts_affected cover the most recent %d rows, not all %d that matched; "+
+				"both the per-host counts and the count of hosts are lower bounds, "+
+				"so report them as \"at least\" and never as totals",
 			examined, total))
 	}
 	return nil

@@ -54,6 +54,10 @@ The evidence reports the bound that was applied as `since`. If you asked for one
 
 **When the question names a kind of problem, `match` it.** Asked which hosts lost their Zabbix agent since 05:00, do not fetch a general page of the morning's events and read down it. Ask for `match: "Zabbix agent is not available"` with `since: "05:00"`. The page is ordered by recency, and on a busy morning the rows you want are not in the first 25 of 1,200. Reading a general page and reporting what you happened to see there is how a real outage gets described as quiet.
 
+**An ongoing problem is not in the event log for the window you asked about.** An event is written when a problem opens and again when it closes. A machine whose agent went down at 02:00 and is still down at 09:00 wrote nothing between those hours, so a search of the event log since 05:00 returns zero rows for it -- and zero rows read as "nothing is wrong". On 30 August, `monitoring.history` since 05:00 matched **0** events for "Zabbix agent is not available" while `monitoring.problems` with the same `match` showed **19 hosts with the agent down right now**.
+
+So: "what is still broken" is always `monitoring.problems`, whatever time the question mentions. Use `monitoring.history` only for what *changed* during the window. If a history search comes back empty, say that nothing opened or closed in that window -- not that nothing is wrong -- and check current problems before offering any reassurance.
+
 **An incident appears twice in the event log.** It opens as `problem` and closes as `resolved`. Counting rows without `state` double-counts. "What broke this morning" is `state: "problem"`; "what recovered" is `state: "resolved"`; "what is still broken now" is `monitoring.problems`, not the event log at all.
 
 **A large result is not answered by asking for more rows.** `limit` caps at 200 because evidence beyond the budget is discarded whole rather than shortened, so a request for 1,200 rows returns nothing rather than a longer list. When `total_matching` exceeds `returned`, the answer is in the aggregates:
