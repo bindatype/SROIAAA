@@ -503,3 +503,71 @@ func TestDescribesACallInsteadLetsRealAnswersThrough(t *testing.T) {
 		}
 	}
 }
+
+// The answer is the claim the rest of the record exists to check, so it must
+// be in the record. A scheduled report posts with nobody watching, and a
+// length alone cannot be reviewed.
+func TestAuditRecordsTheAnswerText(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	auditor, err := NewAuditor(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer := "1,242 problems since yesterday: 374 high, 433 average, 435 warning."
+	if err := auditor.Record(AuditEvent{
+		Question: "what problems started since yesterday?",
+		Status:   "answered", Decision: "allowed",
+		Answer: answer, AnswerChars: len(answer),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	auditor.Close()
+
+	var event AuditEvent
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Answer != answer {
+		t.Fatalf("answer = %q, want %q", event.Answer, answer)
+	}
+	if event.AnswerChars != len(answer) {
+		t.Fatalf("answer_chars = %d, want %d", event.AnswerChars, len(answer))
+	}
+}
+
+// A runaway answer must not fill the file, and a capped record must still
+// report the true length so the truncation is visible.
+func TestAuditCapsALongAnswer(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	auditor, err := NewAuditor(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer := strings.Repeat("x", maxAuditAnswer*2)
+	if err := auditor.Record(AuditEvent{
+		Status: "answered", Decision: "allowed",
+		Answer: answer, AnswerChars: len(answer),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	auditor.Close()
+
+	var event AuditEvent
+	raw, _ := os.ReadFile(path)
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &event); err != nil {
+		t.Fatal(err)
+	}
+	if len(event.Answer) > maxAuditAnswer+32 {
+		t.Fatalf("stored %d bytes, cap is %d", len(event.Answer), maxAuditAnswer)
+	}
+	if !strings.Contains(event.Answer, "truncated") {
+		t.Fatal("a capped answer must say it was capped")
+	}
+	if event.AnswerChars != len(answer) {
+		t.Fatalf("answer_chars = %d, want the true length %d", event.AnswerChars, len(answer))
+	}
+}

@@ -243,6 +243,7 @@ func (s *Session) Ask(ctx context.Context, question string) (string, error) {
 			} else {
 				s.record("answer_synthesized", "", true)
 			}
+			s.event.Answer = answer
 			s.event.AnswerChars = len(answer)
 			return answer, nil
 		}

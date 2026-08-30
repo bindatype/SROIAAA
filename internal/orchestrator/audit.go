@@ -32,9 +32,22 @@ type AuditEvent struct {
 
 	Calls []AuditCall `json:"calls,omitempty"`
 
-	// AnswerChars rather than the answer. The question is short and worth
-	// searching on; an answer is long and reconstructible from the plan and the
-	// evidence summary.
+	// Answer is what was actually said, which is the claim the rest of this
+	// record exists to check.
+	//
+	// This field once held only a length, on the reasoning that an answer is
+	// reconstructible from the plan and the evidence summary. It is not. The
+	// answer is the model's prose over that evidence, and the gap between the
+	// two is precisely where this project's wrong answers have lived: a count
+	// tallied by hand instead of read from the summary, an empty result
+	// reported as an all-clear. Neither is visible in the plan or the summary,
+	// because both were correct.
+	//
+	// It mattered less when answers went to a terminal someone was reading. A
+	// scheduled report posts to a channel with nobody watching, and an audit
+	// that cannot show what was said cannot check it.
+	Answer string `json:"answer,omitempty"`
+	// AnswerChars is the true length, kept even when Answer is capped.
 	AnswerChars int    `json:"answer_chars,omitempty"`
 	Status      string `json:"status"`
 	Error       string `json:"error,omitempty"`
@@ -55,6 +68,11 @@ type AuditCall struct {
 	Truncated  bool           `json:"truncated"`
 	Summary    map[string]int `json:"summary,omitempty"`
 }
+
+// maxAuditAnswer bounds a recorded answer. An answer is a paragraph; anything
+// near this is a malfunction, and the cap keeps one from filling the file.
+// AnswerChars still records the true length, so a capped record says so.
+const maxAuditAnswer = 8192
 
 // Auditor appends events to a JSON-lines file.
 type Auditor struct {
@@ -92,6 +110,9 @@ func (a *Auditor) Record(event AuditEvent) error {
 
 	if event.Timestamp == "" {
 		event.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	if len(event.Answer) > maxAuditAnswer {
+		event.Answer = event.Answer[:maxAuditAnswer] + "\u2026 [truncated]"
 	}
 	encoded, err := json.Marshal(event)
 	if err != nil {
