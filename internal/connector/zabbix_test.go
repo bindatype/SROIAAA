@@ -536,3 +536,112 @@ func TestZabbixWarnsWhenTheHostBreakdownIsPartial(t *testing.T) {
 		t.Errorf("warning does not say how many hosts were left unnamed: %q", evidence.Warnings[0])
 	}
 }
+
+func TestZabbixCensusIsExactWhenTheRowFetchOverflows(t *testing.T) {
+	// A row census reports len(result), which stops being a count the moment it
+	// equals its own limit. Live Zabbix had 21,296 events since 05:00 against a
+	// 20,000-row census: the total would have been reported as exactly 20,000,
+	// which reads as a measurement and is a ceiling.
+	countCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var request struct {
+			Params map[string]any `json:"params"`
+		}
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if request.Params["countOutput"] == true {
+			countCalls++
+			filter, _ := request.Params["filter"].(map[string]any)
+			level := int(filter["severity"].(float64))
+			// 21,296 split so that no single level reaches the row cap.
+			perLevel := map[int]int{0: 1, 1: 2, 2: 20000, 3: 1000, 4: 290, 5: 3}
+			// Zabbix returns countOutput as a string, not a number.
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":"%d"}`, perLevel[level])
+			return
+		}
+		if _, hasHosts := request.Params["selectHosts"]; !hasHosts {
+			// The row census, overflowing at its cap.
+			rows := make([]string, 0, maxCensusRows)
+			for i := 0; i < maxCensusRows; i++ {
+				rows = append(rows, `{"severity":"2"}`)
+			}
+			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[`+strings.Join(rows, ",")+`]}`)
+			return
+		}
+		io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[
+			{"eventid":"1","clock":"1756300000","name":"Load average is too high","severity":"2","value":"1","hosts":[{"host":"node01"}]}
+		]}`)
+	}))
+	defer server.Close()
+
+	connector := newTestZabbix(t, server.URL)
+	evidence, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceZabbixAPI,
+		Action: "event.get",
+		Limit:  1,
+		Since:  "2026-08-30T09:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if evidence.TotalAvailable != 21296 {
+		t.Errorf("total = %d, want the exact 21296 rather than the 20000-row ceiling", evidence.TotalAvailable)
+	}
+	if evidence.Summary["total_matching"] != 21296 {
+		t.Errorf("total_matching = %d, want 21296", evidence.Summary["total_matching"])
+	}
+	if evidence.Summary["warning"] != 20000 || evidence.Summary["average"] != 1000 {
+		t.Errorf("severity breakdown describes the page, not the population: %v", evidence.Summary)
+	}
+	if countCalls != 6 {
+		t.Errorf("countOutput calls = %d, want one per severity so their sum is the exact total", countCalls)
+	}
+}
+
+func TestZabbixCensusStaysCheapWhenItFits(t *testing.T) {
+	// The exact census costs a round trip per severity, so it must not run on
+	// the ordinary case where the row fetch already holds every matching row.
+	countCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var request struct {
+			Params map[string]any `json:"params"`
+		}
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if request.Params["countOutput"] == true {
+			countCalls++
+			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":"0"}`)
+			return
+		}
+		if _, hasHosts := request.Params["selectHosts"]; !hasHosts {
+			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[{"severity":"4"},{"severity":"2"}]}`)
+			return
+		}
+		io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[
+			{"eventid":"1","clock":"1756300000","name":"Agent down","severity":"4","value":"1","hosts":[{"host":"node01"}]},
+			{"eventid":"2","clock":"1756300100","name":"Load high","severity":"2","value":"1","hosts":[{"host":"node02"}]}
+		]}`)
+	}))
+	defer server.Close()
+
+	connector := newTestZabbix(t, server.URL)
+	evidence, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceZabbixAPI,
+		Action: "event.get",
+		Limit:  25,
+		Since:  "2026-08-30T09:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if countCalls != 0 {
+		t.Errorf("countOutput ran %d times for a census that fit", countCalls)
+	}
+	if evidence.TotalAvailable != 2 {
+		t.Errorf("total = %d, want 2", evidence.TotalAvailable)
+	}
+}

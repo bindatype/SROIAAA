@@ -573,6 +573,16 @@ func (c *ZabbixConnector) census(ctx context.Context, method string, params map[
 		return 0, nil, newConnectorError("zabbix_error", envelope.Error.Message+": "+envelope.Error.Data)
 	}
 
+	if len(envelope.Result) >= maxCensusRows {
+		// The fetch hit its own ceiling, so len() is the cap rather than the
+		// count. Live Zabbix had 21,296 events since 05:00 one morning against
+		// a 20,000-row census, which would have been reported as a total of
+		// exactly 20,000 -- a round number that is a limit wearing the costume
+		// of a measurement, and the severity breakdown under it would have
+		// described 20,000 of them as though it described all.
+		return c.exactCensus(ctx, method, params)
+	}
+
 	counts := make(map[string]int, 6)
 	for _, row := range envelope.Result {
 		level := row.Priority
@@ -586,6 +596,64 @@ func (c *ZabbixConnector) census(ctx context.Context, method string, params map[
 		counts[severity]++
 	}
 	return len(envelope.Result), counts, nil
+}
+
+// exactCensus counts each severity separately with countOutput, which Zabbix
+// answers from the database without returning rows and so without any ceiling.
+//
+// It costs one round trip per severity, which is why it runs only when the row
+// census overflows. Severities partition the result -- every event carries
+// exactly one -- so their sum is the exact total, and no separate total call is
+// needed.
+func (c *ZabbixConnector) exactCensus(ctx context.Context, method string, params map[string]any) (int, map[string]int, error) {
+	column := "priority"
+	if method == "event.get" {
+		column = "severity"
+	}
+
+	counts := make(map[string]int, 6)
+	total := 0
+	for level := 0; level <= 5; level++ {
+		levelParams := make(map[string]any, len(params)+2)
+		for key, value := range params {
+			switch key {
+			case "limit", "output", "sortfield", "sortorder", "selectHosts", "expandDescription":
+				continue
+			}
+			levelParams[key] = value
+		}
+		// An exact-value filter alongside whatever floor the caller asked for.
+		// The two agree rather than fight: a level below the requested floor is
+		// excluded by the floor and correctly counts zero.
+		levelParams["filter"] = map[string]any{column: level}
+		levelParams["countOutput"] = true
+
+		payload, err := c.rawCall(ctx, method, levelParams)
+		if err != nil {
+			return 0, nil, err
+		}
+		var envelope struct {
+			// Zabbix returns countOutput as a JSON string, not a number.
+			Result string `json:"result"`
+			Error  *struct {
+				Message string `json:"message"`
+				Data    string `json:"data"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(payload, &envelope); err != nil {
+			return 0, nil, newConnectorError("decode_response", err.Error())
+		}
+		if envelope.Error != nil {
+			return 0, nil, newConnectorError("zabbix_error", envelope.Error.Message+": "+envelope.Error.Data)
+		}
+		count, err := strconv.Atoi(envelope.Result)
+		if err != nil {
+			return 0, nil, newConnectorError("decode_response", "countOutput was not a number: "+envelope.Result)
+		}
+		counts[zabbixPriority[strconv.Itoa(level)]] = count
+		total += count
+	}
+	return total, counts, nil
 }
 
 // hostExists reports whether Zabbix monitors a host by this exact name.
