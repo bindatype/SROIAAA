@@ -81,9 +81,14 @@ def worst_host():
     return max(counts, key=counts.get) if counts else None
 
 
-def opened_since_yesterday():
-    midnight = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    since = int((midnight - datetime.timedelta(days=1)).timestamp())
+def opened_last_24h():
+    """Problems that OPENED in the last 24 hours.
+
+    value=[1] is the opening event. Without it an incident that opened and
+    closed inside the window is counted twice, which is the fault this case
+    exists to catch -- so the ground truth must not commit it either.
+    """
+    since = int((datetime.datetime.now() - datetime.timedelta(hours=24)).timestamp())
     return int(zabbix("event.get", {"source": 0, "object": 0, "time_from": since,
                                     "value": [1], "countOutput": True}))
 
@@ -120,75 +125,91 @@ def ask(binary, model, prompt_path, question):
     return proc.stdout.strip(), round(time.time() - started, 1)
 
 
-# Each case grades against a number computed seconds earlier, not against a
-# fixed string. `lead` marks the cases where being right in the body but
-# reassuring in the first sentence is itself the failure.
-def build_cases():
-    down_triggers, down_hosts = agents_down()
-    return [
-        {"id": "false_allclear", "lead": True,
-         "q": "Did any host lose its Zabbix agent since 5am today?",
-         "why": "The event log is empty because an ongoing outage writes nothing inside its own window.",
-         "must_number": down_hosts,
-         "forbid_lead": ["no host", "none", "no hosts"]},
-        {"id": "narrow",
-         "q": "Which hosts have lost their Zabbix agent?",
-         "why": "Needs match rather than reading down a general page.",
-         "must_number": down_triggers},
-        {"id": "rows_vs_hosts",
-         "q": "How many machines currently have a Zabbix agent problem?",
-         "why": "Several triggers fire on one host; the trigger count is not the machine count.",
-         "must_number": down_hosts},
-        {"id": "population",
-         "q": "How many problems are active right now?",
-         "why": "A page size reported as a population.",
-         "must_number": problems_now(), "tolerance": 0.03,
-         "forbid": ["25 problems", "200 problems"]},
-        {"id": "worst_hosts",
-         "q": "Which systems are in the worst shape right now?",
-         "why": "Needs the per-host breakdown, not whichever hosts landed in the page.",
-         "must_text": [worst_host()]},
-        {"id": "double_count",
-         "q": "How many problems started since yesterday?",
-         "why": "Counting both the opening and closing event doubles the figure.",
-         "must_number": opened_since_yesterday(), "tolerance": 0.10},
-    ]
+# Each case carries a callable for its ground truth, sampled immediately before
+# AND after every individual ask, with any value in that range accepted.
+#
+# The first version of this suite sampled once for the whole run and compared
+# minutes later. On this Zabbix the event log gains thousands of rows an hour,
+# so the `double_count` case scored 0/3 against a figure that had been correct
+# when it was taken and was stale by the time it was used. The Zabbix guide
+# says exactly this -- "counts move fast, sample before and after, accept a
+# range" -- and the suite did not do it.
+CASES = [
+    {"id": "false_allclear",
+     "q": "Did any host lose its Zabbix agent since 5am today?",
+     "why": "The event log is empty because an ongoing outage writes nothing inside its own window.",
+     "truth": lambda: agents_down()[1], "lead": True},
+    {"id": "narrow",
+     "q": "Which hosts have lost their Zabbix agent?",
+     "why": "Needs match rather than reading down a general page.",
+     "truth": lambda: agents_down()[0]},
+    {"id": "rows_vs_hosts",
+     "q": "How many machines currently have a Zabbix agent problem?",
+     "why": "Several triggers fire on one host; the trigger count is not the machine count.",
+     "truth": lambda: agents_down()[1]},
+    {"id": "population",
+     "q": "How many problems are active right now?",
+     "why": "A page size reported as a population.",
+     "truth": problems_now, "forbid": ["25 problems", "200 problems"]},
+    {"id": "worst_hosts",
+     "q": "Which systems are in the worst shape right now?",
+     "why": "Needs the per-host breakdown, not whichever hosts landed in the page.",
+     "truth_text": worst_host},
+    {"id": "double_count",
+     # "since yesterday" is ambiguous between "the last 24 hours" and "since
+     # yesterday began", and the two differ by tens of thousands of rows here.
+     # A case that punishes a model for choosing the other reading is measuring
+     # the question, not the prompt.
+     "q": "How many problems started in the last 24 hours?",
+     "why": "Counting both the opening and closing event doubles the figure.",
+     "truth": opened_last_24h},
+]
 
 
-def grade(case, answer):
-    faults = []
+def numbers_in(answer):
+    out = []
+    for token in normalize(answer).replace(",", " ").replace("*", " ").split():
+        digits = "".join(c for c in token if c.isdigit())
+        if digits:
+            out.append(int(digits))
+    return out
+
+
+def grade(case, answer, low, high, expect_text):
+    """Return (substance_faults, lead_faults).
+
+    Substance and lead are graded apart because collapsing them hid the thing
+    this A/B was built to see. On `false_allclear` the old prompt omitted the
+    current outage entirely while the new prompt reported it and merely led
+    with the wrong clause; scored as one bit, both read as 0/3 and the
+    improvement was invisible.
+    """
     if not answer:
-        return ["empty"]
+        return ["empty"], []
     text = normalize(answer)
+    substance, lead = [], []
 
-    if "must_number" in case and case["must_number"] is not None:
-        want = case["must_number"]
-        tolerance = case.get("tolerance", 0)
-        ok = says(answer, want)
-        if not ok and tolerance:
-            # A volatile count only has to land close, but the answer must
-            # still contain some number: "several" is not a measurement.
-            digits = [int(t) for t in normalize(answer).replace(",", "").split()
-                      if t.isdigit()]
-            ok = any(abs(d - want) <= max(1, want * tolerance) for d in digits)
-        if not ok:
-            faults.append("missing:%s" % want)
-
-    for token in case.get("must_text", []):
-        if token and token.lower() not in text:
-            faults.append("missing:%s" % token)
+    if low is not None:
+        if not any(low <= n <= high for n in numbers_in(answer)):
+            substance.append("missing:%d-%d" % (low, high))
+    if expect_text and expect_text.lower() not in text:
+        substance.append("missing:%s" % expect_text)
     for token in case.get("forbid", []):
         if token.lower() in text:
-            faults.append("said:%s" % token)
+            substance.append("said:%s" % token)
 
-    # The lead check: an answer that is right in the body and reassuring in its
-    # first sentence still misleads a reader who stops there, and these go to a
-    # chat channel where people skim.
-    if case.get("lead"):
+    # A first sentence that carries BOTH the "no" and the current failure is a
+    # good answer, not a bad one: "No host has lost its agent since 5am, but 14
+    # hosts currently have it down" tells a reader who stops there the truth.
+    # Only a first sentence that is reassuring AND silent about the outage
+    # fails.
+    if case.get("lead") and low is not None:
         first = text.split(".")[0]
-        if any(p in first for p in case.get("forbid_lead", [])):
-            faults.append("lead-is-reassuring")
-    return faults
+        reassuring = any(p in first for p in ("no host", "no hosts", "none"))
+        carries = any(low <= n <= high for n in numbers_in(first))
+        if reassuring and not carries:
+            lead.append("lead-omits-the-outage")
+    return substance, lead
 
 
 def main():
@@ -212,25 +233,39 @@ def main():
     print("  new prompt  working tree  %d chars  (+%d)\n"
           % (len(current), len(current) - len(baseline.stdout)), flush=True)
 
-    cases = build_cases()
     tally = {name: {} for name, _, _ in arms}
-    for case in cases:
+    for case in CASES:
         print("── %s ─ %s" % (case["id"], case["why"]), flush=True)
         for name, path, _ in arms:
-            passes, seconds = 0, []
+            subs_pass, lead_pass, seconds = 0, 0, []
             for _ in range(RUNS):
+                # Sampled around the ask, not once for the suite: this event log
+                # gains thousands of rows an hour.
+                before = case["truth"]() if "truth" in case else None
+                expect_text = case["truth_text"]() if "truth_text" in case else None
                 answer, took = ask(binary, model, path, case["q"])
+                after = case["truth"]() if "truth" in case else None
                 seconds.append(took)
-                faults = grade(case, answer)
-                if not faults:
-                    passes += 1
-                else:
-                    print("     %-3s FAIL %-28s %s" % (name, ";".join(faults),
-                                                       answer[:90].replace("\n", " ")), flush=True)
-            tally[name][case["id"]] = passes
-            print("     %-3s %d/%d  avg %.1fs" % (name, passes, RUNS,
-                                                  sum(seconds) / len(seconds)), flush=True)
+
+                low = high = None
+                if before is not None:
+                    low, high = min(before, after), max(before, after)
+                substance, lead = grade(case, answer, low, high, expect_text)
+                if not substance:
+                    subs_pass += 1
+                if not lead:
+                    lead_pass += 1
+                if substance or lead:
+                    print("     %-3s %-26s %s" % (name, ";".join(substance + lead),
+                                                  answer[:88].replace("\n", " ")), flush=True)
+            tally[name][case["id"]] = (subs_pass, lead_pass)
+            note = "" if not case.get("lead") else "  lead %d/%d" % (lead_pass, RUNS)
+            print("     %-3s substance %d/%d%s  avg %.1fs"
+                  % (name, subs_pass, RUNS, note, sum(seconds) / len(seconds)), flush=True)
         print(flush=True)
+
+    def total(name):
+        return sum(v[0] for v in tally[name].values())
 
     lines = ["Generated %s" % datetime.datetime.now().isoformat(timespec="seconds"), "",
              "Model `%s`, %d runs per case. **Both arms run the same binary**; the prompt"
@@ -238,18 +273,24 @@ def main():
              " code never emitted." % (model, RUNS), "",
              "Old prompt `%s`, %d chars. New prompt, %d chars (+%d)."
              % (BASELINE_REV, len(baseline.stdout), len(current), len(current) - len(baseline.stdout)), "",
+             "Ground truth is sampled immediately before and after every ask and any value"
+             " in that range is accepted; these counts move by thousands an hour.", "",
              "| case | old | new | what it catches |", "|---|---|---|---|"]
-    for case in cases:
-        lines.append("| `%s` | %d/%d | %d/%d | %s |" % (
-            case["id"], tally["old"][case["id"]], RUNS,
-            tally["new"][case["id"]], RUNS, case["why"]))
-    old_total = sum(tally["old"].values())
-    new_total = sum(tally["new"].values())
-    lines += ["", "**Total: old %d/%d, new %d/%d.**"
-              % (old_total, len(cases) * RUNS, new_total, len(cases) * RUNS)]
+    for case in CASES:
+        old_s, _ = tally["old"][case["id"]]
+        new_s, _ = tally["new"][case["id"]]
+        lines.append("| `%s` | %d/%d | %d/%d | %s |"
+                     % (case["id"], old_s, RUNS, new_s, RUNS, case["why"]))
+    lines += ["", "**Substance total: old %d/%d, new %d/%d.**"
+              % (total("old"), len(CASES) * RUNS, total("new"), len(CASES) * RUNS)]
+    for case in CASES:
+        if case.get("lead"):
+            lines += ["", "Lead-sentence check on `%s`: old %d/%d, new %d/%d."
+                      % (case["id"], tally["old"][case["id"]][1], RUNS,
+                         tally["new"][case["id"]][1], RUNS)]
 
-    print("===== old %d/%d   new %d/%d =====" % (old_total, len(cases) * RUNS,
-                                                 new_total, len(cases) * RUNS))
+    print("===== substance: old %d/%d   new %d/%d ====="
+          % (total("old"), len(CASES) * RUNS, total("new"), len(CASES) * RUNS))
     write_report("eval-prompt-ab.md", "Prompt A/B: pre-Zabbix baseline vs current", lines)
 
 
