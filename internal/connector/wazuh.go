@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +27,15 @@ const (
 	// the manager's own summary endpoint does not. Excluding it from aggregate
 	// counts keeps our numbers equal to what the Wazuh dashboard reports.
 	managerAgentID = "000"
+	// fleetItemCap bounds how many agent records travel back to the model. The
+	// summary already carries exact counts for the whole fleet, so the items
+	// exist to be named, not to be tallied, and 275 full records overran the
+	// orchestrator's 64 KB evidence budget once group membership was added --
+	// which the orchestrator answers by discarding the result whole.
+	//
+	// Items are ordered before the cap applies, so what survives is what a
+	// reader would ask about first.
+	fleetItemCap = 60
 )
 
 // wazuhActions is the fixed action table. Route plans may only name an action
@@ -178,6 +188,9 @@ func (c *WazuhConnector) Execute(ctx context.Context, step broker.RouteStep) (Ev
 	}
 
 	items := normalizeAgents(payload.Data.AffectedItems, c.criticalGroups)
+	if step.Action == "agents.list" && len(items) > fleetItemCap {
+		items = items[:fleetItemCap]
+	}
 	return Evidence{
 		Source:         string(broker.SourceWazuhAPI),
 		Action:         step.Action,
@@ -334,7 +347,34 @@ func normalizeAgents(agents []wazuhAgent, critical map[string]struct{}) []Eviden
 		}
 		items = append(items, item)
 	}
+
+	// Order before anything truncates, so a capped list still contains what a
+	// reader would ask about first: critical agents that are down, then any
+	// other agent that is down, then the rest. Within a tier, by name, so the
+	// same fleet produces the same list twice running.
+	sort.SliceStable(items, func(a, b int) bool {
+		rankA, rankB := itemRank(items[a]), itemRank(items[b])
+		if rankA != rankB {
+			return rankA < rankB
+		}
+		return items[a].Host < items[b].Host
+	})
 	return items
+}
+
+// itemRank orders an agent by how much its absence matters.
+func itemRank(item EvidenceItem) int {
+	down := item.State != "active" && item.State != ""
+	switch {
+	case item.Fields["critical"] == "true" && down:
+		return 0
+	case down:
+		return 1
+	case item.Fields["critical"] == "true":
+		return 2
+	default:
+		return 3
+	}
 }
 
 // summarizeAgents counts agents by connection state, and separately counts the

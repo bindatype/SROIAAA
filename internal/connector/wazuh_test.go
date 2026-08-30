@@ -61,11 +61,23 @@ func TestWazuhConnectorAuthenticatesThenListsAgents(t *testing.T) {
 	if !evidence.Truncated {
 		t.Error("Truncated should be true when the fleet exceeds the returned page")
 	}
-	if evidence.Items[1].State != "disconnected" {
-		t.Errorf("state = %q", evidence.Items[1].State)
+	// Items are ordered by what matters rather than by the order Wazuh returned
+	// them, so look the agent up rather than assuming a position.
+	var disconnected *EvidenceItem
+	for i := range evidence.Items {
+		if evidence.Items[i].State == "disconnected" {
+			disconnected = &evidence.Items[i]
+		}
 	}
-	if evidence.Items[1].Fields["ip"] != "10.0.0.2" {
-		t.Errorf("ip field = %q", evidence.Items[1].Fields["ip"])
+	if disconnected == nil {
+		t.Fatalf("no disconnected agent in %+v", evidence.Items)
+	}
+	if disconnected.Fields["ip"] != "10.0.0.2" {
+		t.Errorf("ip field = %q", disconnected.Fields["ip"])
+	}
+	// A down agent sorts ahead of an active one.
+	if evidence.Items[0].State != "disconnected" {
+		t.Errorf("items[0] = %q, want the disconnected agent first", evidence.Items[0].State)
 	}
 	if !strings.Contains(capturedQuery, "limit=500") {
 		t.Errorf("query = %q, want the plan limit applied", capturedQuery)
@@ -289,5 +301,34 @@ func TestNormalizeAgentsMarksCriticalItems(t *testing.T) {
 	}
 	if _, marked := items[1].Fields["critical"]; marked {
 		t.Fatal("an agent outside every critical group must not be marked")
+	}
+}
+
+// The item list is capped, so what survives the cap has to be what matters.
+// Critical agents that are down come first, then anything else down.
+func TestNormalizeAgentsOrdersByWhatMatters(t *testing.T) {
+	critical := map[string]struct{}{"RTS_Ops": {}}
+	items := normalizeAgents([]wazuhAgent{
+		{ID: "1", Name: "zzz-active-ordinary", Status: "active"},
+		{ID: "2", Name: "mmm-down-ordinary", Status: "disconnected"},
+		{ID: "3", Name: "aaa-active-critical", Status: "active", Group: []string{"RTS_Ops"}},
+		{ID: "4", Name: "yyy-down-critical", Status: "disconnected", Group: []string{"RTS_Ops"}},
+		{ID: "5", Name: "bbb-down-critical", Status: "disconnected", Group: []string{"RTS_Ops"}},
+	}, critical)
+
+	got := make([]string, len(items))
+	for i, item := range items {
+		got[i] = item.Host
+	}
+	want := []string{
+		"bbb-down-critical", "yyy-down-critical", // critical and down, by name
+		"mmm-down-ordinary",   // down
+		"aaa-active-critical", // critical, up
+		"zzz-active-ordinary", // neither
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("order[%d] = %s, want %s\n  got: %v", i, got[i], want[i], got)
+		}
 	}
 }
