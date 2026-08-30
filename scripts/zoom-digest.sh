@@ -59,4 +59,7 @@ digest() {
 
 digest "Zabbix overnight" "what problems started since yesterday, and how many are there by severity?"
 digest "Wazuh agents" "how many agents are disconnected right now?"
-digest "Scheduler" "how many jobs failed in the last 24 hours, and how many completed?"
+# Not "the last 24 hours": runTBL2 lags ingestion by about a day, so that
+# window holds only the leading edge and reads as an idle cluster every
+# morning. A complete past day is the honest question.
+digest "Scheduler" "how many jobs failed and how many completed on the most recent complete day in runTBL2? Say which day."

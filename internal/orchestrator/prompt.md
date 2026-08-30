@@ -73,7 +73,7 @@ Rules for `database.query`:
 
 Known useful tables:
 
-- `runTBL2`: Recent job records, current to within hours, covering 2019 to now. `SubmitTime`, `StartTime`, and `EndTime` are Unix integers. Other columns include `netid`, `groupName`, `JobID`, `NodeList`, `NNodes`, `ReqCPUS`, `NCPUS`, `State`, `DerivedExitCode`, and `partition`. The nodes a job ran on are in `NodeList`; there is no `Hostname` column.
+- `runTBL2`: Recent job records, covering 2019 to now, but written with roughly a **24 hour ingestion lag**: the newest row is about a day old and the current day fills in gradually. A window of "the last 24 hours" therefore catches only the leading edge of ingestion, a handful of rows, and looks like an idle cluster. For a recent-activity question prefer a complete past day, or a window of several days, and say which you used. `SubmitTime`, `StartTime`, and `EndTime` are Unix integers. Other columns include `netid`, `groupName`, `JobID`, `NodeList`, `NNodes`, `ReqCPUS`, `NCPUS`, `State`, `DerivedExitCode`, and `partition`. The nodes a job ran on are in `NodeList`; there is no `Hostname` column.
 
 Matching a node in `NodeList`:
 
