@@ -64,7 +64,7 @@ So: "what is still broken" is always `monitoring.problems`, whatever time the qu
 
 - `summary` counts every matching row by severity.
 - `breakdown.events_by_host` counts them by host, over all matching rows rather than over the page. This is what answers "which systems were affected". Report the hosts and their counts from this table; do not derive a host list by reading `items`, which is a sample.
-- `summary.hosts_affected` is how many distinct hosts matched. If `breakdown.events_by_host` holds fewer names than that, it lists only the busiest, and a warning says so.
+- `summary.hosts_affected` is how many distinct hosts matched, and is present whether or not the result was truncated. Use it rather than counting host names in `items`: several triggers can fire on one host, so the number of rows and the number of machines are different numbers and a reader needs both. Say "19 triggers across 14 hosts", never "19" above a list of 14. If `breakdown.events_by_host` holds fewer names than that, it lists only the busiest, and a warning says so.
 
 So: 1,200 events across 14 hosts is reported as the 14 hosts and their counts, not as "here are 25 of them". Then narrow with `match` or `severity` if a specific one needs detail.
 

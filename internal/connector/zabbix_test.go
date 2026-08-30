@@ -653,3 +653,43 @@ func TestZabbixCensusStaysCheapWhenItFits(t *testing.T) {
 		t.Errorf("total = %d, want 2", evidence.TotalAvailable)
 	}
 }
+
+func TestZabbixCountsHostsEvenWhenNothingIsTruncated(t *testing.T) {
+	// Several triggers can fire on one host, so rows and machines are different
+	// numbers. Handed 3 complete rows over 2 hosts, a model reported the row
+	// count above a shorter list of names and left the reader to reconcile them.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		kind, _ := classifyZabbixCall(t, body)
+		if kind == "severity-census" {
+			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[{"priority":"4"},{"priority":"4"},{"priority":"3"}]}`)
+			return
+		}
+		io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[
+			{"triggerid":"1","description":"Zabbix agent is not available","priority":"4","value":"1","lastchange":"1756300000","hosts":[{"host":"cpu052"}]},
+			{"triggerid":"2","description":"Linux: Zabbix agent is not available","priority":"4","value":"1","lastchange":"1756300001","hosts":[{"host":"cpu052"}]},
+			{"triggerid":"3","description":"Zabbix agent is not available","priority":"3","value":"1","lastchange":"1756300002","hosts":[{"host":"gpu002"}]}
+		]}`)
+	}))
+	defer server.Close()
+
+	connector := newTestZabbix(t, server.URL)
+	evidence, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceZabbixAPI,
+		Action: "trigger.get",
+		Limit:  25,
+		Match:  "Zabbix agent is not available",
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if evidence.Truncated {
+		t.Fatal("three rows of three is not truncated")
+	}
+	if evidence.Summary["hosts_affected"] != 2 {
+		t.Errorf("hosts_affected = %d, want 2 distinct hosts behind 3 triggers", evidence.Summary["hosts_affected"])
+	}
+	if evidence.Summary["total_matching"] != 3 {
+		t.Errorf("total_matching = %d, want 3", evidence.Summary["total_matching"])
+	}
+}

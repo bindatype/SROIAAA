@@ -213,6 +213,8 @@ func (c *ZabbixConnector) Execute(ctx context.Context, step broker.RouteStep) (E
 		if err := c.attachHostBreakdown(ctx, &evidence, method, params, total); err != nil {
 			return Evidence{}, err
 		}
+	} else {
+		countHostsInPage(&evidence)
 	}
 	return evidence, nil
 }
@@ -329,6 +331,8 @@ func (c *ZabbixConnector) executeEvents(ctx context.Context, step broker.RouteSt
 		if err := c.attachHostBreakdown(ctx, &evidence, "event.get", params, total); err != nil {
 			return Evidence{}, err
 		}
+	} else {
+		countHostsInPage(&evidence)
 	}
 	return evidence, nil
 }
@@ -486,6 +490,24 @@ func topHosts(counts map[string]int) map[string]int {
 // warning whenever the census itself was capped -- because a partial breakdown
 // presented as a whole one is a more convincing wrong answer than no breakdown
 // at all.
+// countHostsInPage fills hosts_affected from the returned rows.
+//
+// It is exact only when the page holds every matching row, which is the one
+// case the host census deliberately skips. Asked which hosts had lost their
+// agent, a model was handed 19 complete rows, counted the distinct hosts by
+// eye, and reported "19 triggers" above a list of 14 names without reconciling
+// them. Nothing was wrong and the answer still had to be puzzled over; the
+// count is free here.
+func countHostsInPage(evidence *Evidence) {
+	hosts := make(map[string]struct{}, len(evidence.Items))
+	for _, item := range evidence.Items {
+		if item.Host != "" {
+			hosts[item.Host] = struct{}{}
+		}
+	}
+	evidence.Summary["hosts_affected"] = len(hosts)
+}
+
 func (c *ZabbixConnector) attachHostBreakdown(ctx context.Context, evidence *Evidence, method string, params map[string]any, total int) error {
 	counts, examined, err := c.hostCensus(ctx, method, params)
 	if err != nil {
