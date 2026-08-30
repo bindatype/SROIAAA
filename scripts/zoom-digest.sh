@@ -40,7 +40,7 @@ ONLY=${1:-}
 #
 # ~/.config/sroiaaa/env is sourced explicitly and not from ~/.bashrc, so a
 # fresh shell has none of these. That is the usual cause.
-required="SROIAAA_MINDROUTER_ENDPOINT MINDROUTER_API_KEY"
+required="SROIAAA_MINDROUTER_ENDPOINT MINDROUTER_API_KEY SROIAAA_WAZUH_CRITICAL_GROUPS"
 [ "$DRY" -eq 1 ] || required="$required SROIAAA_ZOOM_WEBHOOK_URL"
 missing=
 for var in $required; do

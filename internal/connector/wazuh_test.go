@@ -274,14 +274,45 @@ func TestSummarizeAgentsCountsCriticalGroups(t *testing.T) {
 	}
 }
 
-// With no critical groups configured the summary must gain no keys at all,
-// rather than a set of zeroes that read as "nothing is critical".
-func TestSummarizeAgentsOmitsCriticalWhenUnconfigured(t *testing.T) {
+// The reverse of what this test used to assert. Omitting the critical keys when
+// no groups were configured produced a false all-clear in a Zoom channel: the
+// model read the absence as zero and reported that no critical agents were
+// disconnected. The summary must instead say plainly that the check did not
+// run.
+func TestSummarizeAgentsSaysWhenTheCriticalCheckDidNotRun(t *testing.T) {
 	agents := []wazuhAgent{{ID: "1", Status: "disconnected", Group: []string{"RTS_Ops"}}}
-	for key := range summarizeAgents(agents, nil) {
-		if strings.HasPrefix(key, "critical") {
-			t.Fatalf("unconfigured summary carries %q", key)
-		}
+	summary := summarizeAgents(agents, nil)
+
+	configured, present := summary["critical_groups_configured"]
+	if !present {
+		t.Fatal("summary must always state whether critical groups are configured")
+	}
+	if configured != 0 {
+		t.Fatalf("critical_groups_configured = %d, want 0", configured)
+	}
+	// No count may appear, because none was computed. A zero here would be a
+	// claim, and the claim would be false.
+	if _, found := summary["critical_disconnected"]; found {
+		t.Fatal("an uncomputed count must be absent, not zero")
+	}
+}
+
+// When groups are configured, the count is present even at zero, so a reader
+// can tell "checked, none affected" from "never checked".
+func TestSummarizeAgentsReportsZeroWhenConfiguredAndNoneAffected(t *testing.T) {
+	critical := map[string]struct{}{"Viper": {}}
+	agents := []wazuhAgent{{ID: "1", Name: "ordinary", Status: "disconnected", Group: []string{"default"}}}
+	summary := summarizeAgents(agents, critical)
+
+	if summary["critical_groups_configured"] != 1 {
+		t.Fatalf("critical_groups_configured = %d, want 1", summary["critical_groups_configured"])
+	}
+	count, present := summary["critical_disconnected"]
+	if !present {
+		t.Fatal("a configured check must report its count even when zero")
+	}
+	if count != 0 {
+		t.Fatalf("critical_disconnected = %d, want 0", count)
 	}
 }
 

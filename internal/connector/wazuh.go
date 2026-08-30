@@ -388,7 +388,24 @@ func itemRank(item EvidenceItem) int {
 // usually be right and occasionally be confidently wrong, and "which critical
 // machines are down" is not a number to be occasionally wrong about.
 func summarizeAgents(agents []wazuhAgent, critical map[string]struct{}) map[string]int {
-	summary := map[string]int{"total": 0}
+	// Always stated, never inferred from a missing key. Omitting these when no
+	// groups were configured let a model read the absence as zero: asked which
+	// critical agents were down, it answered "no critical agents were
+	// identified as disconnected, as the critical_disconnected count was absent
+	// from the evidence summary" -- an all-clear posted to a channel, derived
+	// from configuration that was simply not loaded.
+	//
+	// critical_groups_configured distinguishes "checked, none affected" from
+	// "never checked". When it is zero the question was not answered at all.
+	summary := map[string]int{
+		"total":                      0,
+		"critical_groups_configured": len(critical),
+	}
+	if len(critical) > 0 {
+		// Present even at zero, so absence can never be mistaken for none.
+		summary["critical_total"] = 0
+		summary["critical_disconnected"] = 0
+	}
 	for _, agent := range agents {
 		if agent.ID == managerAgentID {
 			continue
