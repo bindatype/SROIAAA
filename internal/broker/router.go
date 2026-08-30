@@ -68,22 +68,45 @@ func (r *Router) Plan(request RouteRequest) (RoutePlan, error) {
 		if request.Host != "" || request.Resource != "" {
 			return RoutePlan{}, newRouteError("invalid_request", "fleet.inventory does not accept host or resource")
 		}
+		if request.Since != "" || request.Until != "" {
+			// A time bound here is worse than useless, because it is applied to
+			// lastKeepAlive. A disconnected agent has by definition stopped
+			// checking in, so bounding the inventory by recent contact removes
+			// precisely the agents the question is about, and the empty result
+			// reads as good news. Asked "how many agents are disconnected right
+			// now", a model added since: "1s", got four active agents, and
+			// answered "zero agents are disconnected" against a true count of
+			// 52.
+			//
+			// Connection state is current state and has no window. Refusing is
+			// the only safe answer: silently ignoring the bound would leave the
+			// model believing it had asked a narrower question than it had.
+			return RoutePlan{}, newRouteError("invalid_request",
+				"fleet.inventory reports current connection state and takes no since or until; "+
+					"a time bound filters on last contact, which hides the disconnected agents")
+		}
 		return newPlan(request.Intent, RouteStep{
 			Source: SourceWazuhAPI,
 			Action: "agents.list",
 			Limit:  fleetInventoryLimit,
-			Since:  sinceValue,
 		}), nil
 
 	case IntentAgentStatus:
 		if err := requireHostOnly(request); err != nil {
 			return RoutePlan{}, err
 		}
+		if request.Since != "" || request.Until != "" {
+			// Same trap as fleet.inventory: the bound is applied to
+			// lastKeepAlive, so a disconnected agent falls out of its own
+			// status query.
+			return RoutePlan{}, newRouteError("invalid_request",
+				"agent.status reports current connection state and takes no since or until; "+
+					"a time bound filters on last contact, which hides a disconnected agent")
+		}
 		return newPlan(request.Intent, RouteStep{
 			Source: SourceWazuhAPI,
 			Action: "agents.status",
 			Host:   request.Host,
-			Since:  sinceValue,
 		}), nil
 
 	case IntentMonitoringProblems:
@@ -264,9 +287,12 @@ func (r *Router) candidateRequests(plan RoutePlan) []RouteRequest {
 
 	switch plan.Intent {
 	case IntentFleetInventory:
-		return []RouteRequest{{Intent: plan.Intent, Since: plan.Steps[0].Since}}
+		return []RouteRequest{{Intent: plan.Intent}}
 
-	case IntentAgentStatus, IntentMonitoringProblems, IntentMonitoringHistory:
+	case IntentAgentStatus:
+		return []RouteRequest{{Intent: plan.Intent, Host: host}}
+
+	case IntentMonitoringProblems, IntentMonitoringHistory:
 		return []RouteRequest{{
 			Intent: plan.Intent, Host: host,
 			Since: plan.Steps[0].Since, Until: plan.Steps[0].Until,

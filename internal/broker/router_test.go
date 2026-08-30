@@ -377,3 +377,50 @@ func TestDatabaseQueryRefusesSince(t *testing.T) {
 		t.Fatal("database.query should refuse since")
 	}
 }
+
+// A time bound on a connection-state intent is applied to lastKeepAlive, so it
+// removes exactly the agents the question is about. Asked how many agents were
+// disconnected "right now", a model sent since: "1s", was given the four
+// agents that had checked in within the second, and reported zero disconnected
+// against a true count of 52. Refusing is the only safe answer: ignoring the
+// bound would leave the model believing it asked a narrower question.
+func TestConnectionStateIntentsRefuseTimeBounds(t *testing.T) {
+	router := newTestRouter(t)
+	for _, request := range []RouteRequest{
+		{Intent: IntentFleetInventory, Since: "1s"},
+		{Intent: IntentFleetInventory, Until: "2026-08-30"},
+		{Intent: IntentAgentStatus, Host: "sgtstubby.arc.gwu.edu", Since: "24h"},
+		{Intent: IntentAgentStatus, Host: "sgtstubby.arc.gwu.edu", Until: "2026-08-30"},
+	} {
+		t.Run(string(request.Intent)+"/"+request.Since+request.Until, func(t *testing.T) {
+			_, err := router.Plan(request)
+			if err == nil {
+				t.Fatal("a time bound must be refused, not silently ignored")
+			}
+			// The message has to say why, or the model retries the same shape.
+			if !strings.Contains(err.Error(), "last contact") {
+				t.Fatalf("error does not explain the hazard: %v", err)
+			}
+		})
+	}
+}
+
+// Without a bound they must still plan normally.
+func TestConnectionStateIntentsPlanWithoutBounds(t *testing.T) {
+	router := newTestRouter(t)
+	for _, request := range []RouteRequest{
+		{Intent: IntentFleetInventory},
+		{Intent: IntentAgentStatus, Host: "sgtstubby.arc.gwu.edu"},
+	} {
+		plan, err := router.Plan(request)
+		if err != nil {
+			t.Fatalf("%s: %v", request.Intent, err)
+		}
+		if plan.Steps[0].Since != "" || plan.Steps[0].Until != "" {
+			t.Fatalf("%s carries a bound it never accepted: %+v", request.Intent, plan.Steps[0])
+		}
+		if err := router.Verify(plan); err != nil {
+			t.Fatalf("%s: verify: %v", request.Intent, err)
+		}
+	}
+}

@@ -37,6 +37,8 @@ Any intent except `database.query` accepts `since` and `until`, which bound evid
 
 **Choose the right intent for the tense of the question.** `monitoring.problems` reports triggers firing now, keyed by when each last changed state; it cannot tell you what happened on a past day, because a trigger that fired in May and resolved leaves nothing behind. `monitoring.history` reads the event log and can. On 21 May there was no trigger whose state last changed that day, and 5011 events.
 
+`fleet.inventory` and `agent.status` report current connection state and take no `since` or `until`; the broker refuses one. A time bound there filters on last contact, and a disconnected agent has stopped making contact, so the bound removes exactly what the question is about and the empty result reads as good news. "Right now" needs no bound.
+
 Without `since`, `monitoring.problems` returns the most severe problems, not the most recent. Some have been firing for years, so a question about today answered from that list is answered from the wrong rows. `database.query` bounds time in its `WHERE` clause and rejects `since`.
 
 The evidence reports the bound that was applied as `since`. If you asked for one and the evidence does not carry it, the result is unfiltered: say so rather than describing it as a time-scoped answer.
