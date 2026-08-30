@@ -5,7 +5,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -70,23 +69,21 @@ func TestSignedRequestPutsTimestampInTheQuery(t *testing.T) {
 	}
 }
 
-// For format=message the body is a JSON string literal, not an object.
-func TestBodyIsAJSONStringLiteral(t *testing.T) {
+// The body is the raw message text. Sending a JSON string literal put visible
+// quotes in the channel, because Zoom prints the body rather than parsing it.
+func TestBodyIsRawText(t *testing.T) {
 	var body []byte
 	server := recorder(t, func(_ *http.Request, b []byte) { body = b })
 	defer server.Close()
-	if err := dial(t, Config{URL: server.URL, Token: "t"}).Post(context.Background(), `say "hi"`); err != nil {
+	message := `say "hi"`
+	if err := dial(t, Config{URL: server.URL, Token: "t"}).Post(context.Background(), message); err != nil {
 		t.Fatal(err)
 	}
-	if body[0] != '"' {
-		t.Fatalf("body is not a string literal: %s", body)
+	if string(body) != message {
+		t.Fatalf("body = %s, want %s", body, message)
 	}
-	var decoded string
-	if err := json.Unmarshal(body, &decoded); err != nil {
-		t.Fatalf("body is not valid JSON: %s", body)
-	}
-	if decoded != `say "hi"` {
-		t.Fatalf("round trip lost content: %q", decoded)
+	if body[0] == '"' && body[len(body)-1] == '"' && !strings.HasPrefix(message, `"`) {
+		t.Fatal("body was JSON-quoted; those quotes appear in the channel")
 	}
 }
 
@@ -106,17 +103,17 @@ func TestTokenRequest(t *testing.T) {
 	}
 }
 
-// Each variant must produce a different signature, or the probe cannot tell
-// them apart and would report every one as accepted.
-func TestVariantsAreDistinct(t *testing.T) {
-	body, _ := json.Marshal("hello")
-	seen := map[string]string{}
+// With a raw-text body, HashRawBody no longer changes anything: the variants
+// collapse to two distinct signatures, not four. Probe must group them rather
+// than report four separate results.
+func TestVariantsCollapseToTwoSignatures(t *testing.T) {
+	body := []byte("hello")
+	distinct := map[string]bool{}
 	for _, v := range Variants {
-		sig := Sign("shhh", "message", "1756500000000", "hello", body, v)
-		if prior, dup := seen[sig]; dup {
-			t.Fatalf("%s and %s produce the same signature", prior, v.Name)
-		}
-		seen[sig] = v.Name
+		distinct[Sign("shhh", "message", "1756500000000", "hello", body, v)] = true
+	}
+	if len(distinct) != 2 {
+		t.Fatalf("got %d distinct signatures, want 2 (standard and url-safe base64)", len(distinct))
 	}
 }
 
@@ -165,9 +162,7 @@ func TestProbeIdentifiesTheAcceptedVariant(t *testing.T) {
 	want := Variants[2] // plain-text/standard
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		var text string
-		json.Unmarshal(body, &text)
-		if r.Header.Get("Authorization") != Sign("shhh", "message", r.URL.Query().Get("timestamp"), text, body, want) {
+		if r.Header.Get("Authorization") != Sign("shhh", "message", r.URL.Query().Get("timestamp"), string(body), body, want) {
 			w.WriteHeader(http.StatusUnauthorized)
 			io.WriteString(w, "bad signature")
 			return
@@ -240,7 +235,7 @@ func TestDescribeSendsNothing(t *testing.T) {
 	if calls != 0 {
 		t.Fatalf("Describe sent %d request(s)", calls)
 	}
-	for _, want := range []string{"format=message", "timestamp=" + strconv.FormatInt(fixedMillis, 10), "Authorization:", `"hello"`} {
+	for _, want := range []string{"format=message", "timestamp=" + strconv.FormatInt(fixedMillis, 10), "Authorization:", "hello"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("description omits %q:\n%s", want, out)
 		}
@@ -249,13 +244,7 @@ func TestDescribeSendsNothing(t *testing.T) {
 
 func TestPostSplitsLongText(t *testing.T) {
 	var posted []string
-	server := recorder(t, func(_ *http.Request, b []byte) {
-		var text string
-		if err := json.Unmarshal(b, &text); err != nil {
-			t.Error(err)
-		}
-		posted = append(posted, text)
-	})
+	server := recorder(t, func(_ *http.Request, b []byte) { posted = append(posted, string(b)) })
 	defer server.Close()
 
 	text := strings.Repeat(strings.Repeat("x", 200)+"\n", 40) // ~8KB

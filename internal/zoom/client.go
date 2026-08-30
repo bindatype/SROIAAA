@@ -16,8 +16,11 @@
 //   - The signature covers "{format}&{timestamp}&{message}", not the body
 //     alone, and is base64 rather than hex.
 //   - Authorization carries the bare signature, with no scheme prefix.
-//   - For format=message the body is a JSON string literal, "like this", not
-//     an object.
+//   - For format=message the body is the raw message text. The documentation
+//     writes it as "This is a test message." and the quotes are illustrative:
+//     send them and Zoom prints them, because it never parses the body as
+//     JSON. Confirmed by a probe message that arrived in-channel still
+//     wearing its quotes.
 package zoom
 
 import (
@@ -26,7 +29,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -57,9 +59,11 @@ const formatMessage = "message"
 // day, and a 401 is otherwise indistinguishable from a bad secret.
 type Variant struct {
 	Name string
-	// HashRawBody hashes the exact bytes POSTed, which for format=message
-	// includes the surrounding JSON quotes. When false, the unquoted text is
-	// hashed instead.
+	// HashRawBody hashed the exact bytes POSTed back when those were a JSON
+	// string literal. Now that the body is the raw text, this and its opposite
+	// produce identical bytes, and Probe groups them accordingly. It is kept
+	// because Zoom's other body formats are objects, where the distinction
+	// returns.
 	HashRawBody bool
 	URLSafe     bool
 }
@@ -166,10 +170,7 @@ func (c *Client) postOne(ctx context.Context, text string) error {
 }
 
 func (c *Client) postAt(ctx context.Context, text, timestamp string) error {
-	body, err := json.Marshal(text)
-	if err != nil {
-		return fmt.Errorf("zoom: encode message: %w", err)
-	}
+	body := []byte(text)
 
 	endpoint, err := url.Parse(c.url)
 	if err != nil {
@@ -253,10 +254,7 @@ func (c *Client) Probe(ctx context.Context) ([]ProbeResult, error) {
 	}
 	text := "sroiaaa signature probe"
 	timestamp := strconv.FormatInt(c.now().UnixMilli(), 10)
-	body, err := json.Marshal(text)
-	if err != nil {
-		return nil, err
-	}
+	body := []byte(text)
 
 	var results []ProbeResult
 	index := map[string]int{}
@@ -342,10 +340,7 @@ func VariantByName(name string) (*Variant, error) {
 // problem gets diagnosed without spending a message in a channel.
 func (c *Client) Describe(text string) (string, error) {
 	timestamp := strconv.FormatInt(c.now().UnixMilli(), 10)
-	body, err := json.Marshal(text)
-	if err != nil {
-		return "", err
-	}
+	body := []byte(text)
 	endpoint, err := url.Parse(c.url)
 	if err != nil {
 		return "", err
