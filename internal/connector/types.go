@@ -43,7 +43,16 @@ type Evidence struct {
 	// for a model to tally from Items. A model asked to count several hundred
 	// records will sometimes get it wrong and state the wrong number with
 	// confidence, so any population-level claim must come from this field.
-	Summary   map[string]int `json:"summary,omitempty"`
+	Summary map[string]int `json:"summary,omitempty"`
+	// Warnings name checks that did not run, in words rather than as a missing
+	// key. A count that was never computed is not zero, and every mechanism
+	// that expressed this by omission has been resolved the reassuring way:
+	// asked which critical agents were down with no critical groups
+	// configured, a model answered "no critical agents are disconnected",
+	// which was posted to a channel while five of them were.
+	//
+	// A warning is a defect in the answer, not a footnote to it.
+	Warnings  []string       `json:"warnings,omitempty"`
 	Truncated bool           `json:"truncated"`
 	Items     []EvidenceItem `json:"items"`
 }

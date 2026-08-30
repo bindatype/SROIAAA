@@ -191,9 +191,17 @@ func (c *WazuhConnector) Execute(ctx context.Context, step broker.RouteStep) (Ev
 	if step.Action == "agents.list" && len(items) > fleetItemCap {
 		items = items[:fleetItemCap]
 	}
+	var warnings []string
+	if len(c.criticalGroups) == 0 {
+		warnings = append(warnings, "critical group membership was NOT evaluated: no critical groups are "+
+			"configured, so this evidence says nothing about whether critical agents are affected. "+
+			"Do not report that none are.")
+	}
+
 	return Evidence{
 		Source:         string(broker.SourceWazuhAPI),
 		Action:         step.Action,
+		Warnings:       warnings,
 		Endpoint:       redactEndpoint(c.endpoint),
 		Since:          step.Since,
 		RequestedAt:    requestedAt,

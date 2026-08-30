@@ -363,3 +363,62 @@ func TestNormalizeAgentsOrdersByWhatMatters(t *testing.T) {
 		}
 	}
 }
+
+// A check that did not run must say so in words, not by leaving a key out.
+// Every mechanism that expressed this by omission was resolved the reassuring
+// way by the model reading it.
+func TestWazuhWarnsWhenCriticalGroupsAreUnconfigured(t *testing.T) {
+	server := newAgentsServer(t)
+	defer server.Close()
+
+	connector := newTestWazuh(t, server.URL)
+	evidence, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceWazuhAPI, Action: "agents.list", Limit: 500,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evidence.Warnings) == 0 {
+		t.Fatal("an unevaluated critical check must warn")
+	}
+	if !strings.Contains(evidence.Warnings[0], "NOT evaluated") {
+		t.Fatalf("warning does not say the check was skipped: %q", evidence.Warnings[0])
+	}
+}
+
+// Configured, the check runs and there is nothing to warn about.
+func TestWazuhDoesNotWarnWhenConfigured(t *testing.T) {
+	server := newAgentsServer(t)
+	defer server.Close()
+
+	connector := newTestWazuh(t, server.URL)
+	connector.criticalGroups = map[string]struct{}{"RTS_Ops": {}}
+	evidence, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceWazuhAPI, Action: "agents.list", Limit: 500,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evidence.Warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", evidence.Warnings)
+	}
+}
+
+// newAgentsServer is a minimal manager: authenticate, then one small fleet in
+// which node02 belongs to RTS_Ops.
+func newAgentsServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/security/user/authenticate"):
+			io.WriteString(w, "jwt-token-value\n")
+		case r.URL.Path == "/agents":
+			io.WriteString(w, `{"data":{"affected_items":[
+				{"id":"000","name":"manager","status":"active","group":["RTS_Ops"]},
+				{"id":"001","name":"node02","status":"disconnected","group":["default","RTS_Ops"]}
+			],"total_affected_items":2,"total_failed_items":0},"message":"ok","error":0}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
