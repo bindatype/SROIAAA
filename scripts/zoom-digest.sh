@@ -11,6 +11,27 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+# Fail before asking anything. Without this the first missing variable surfaces
+# from sroiaaa-notify at the end of a pipeline, after a question has already
+# been answered, and reads as a Zoom problem rather than a missing source.
+#
+# ~/.config/sroiaaa/env is sourced explicitly and not from ~/.bashrc, so a
+# fresh shell has none of these. That is the usual cause.
+missing=
+for var in SROIAAA_MINDROUTER_ENDPOINT MINDROUTER_API_KEY SROIAAA_ZOOM_WEBHOOK_URL; do
+	eval "value=\${$var:-}"
+	[ -n "$value" ] || missing="$missing $var"
+done
+if [ -z "${SROIAAA_ZOOM_WEBHOOK_SECRET:-}${SROIAAA_ZOOM_WEBHOOK_TOKEN:-}" ]; then
+	missing="$missing SROIAAA_ZOOM_WEBHOOK_SECRET"
+fi
+if [ -n "$missing" ]; then
+	echo "zoom-digest: not set in this environment:$missing" >&2
+	echo "zoom-digest: run  . ~/.config/sroiaaa/env  first" >&2
+	echo "zoom-digest: (a variable set in ~/.bashrc without export is invisible here)" >&2
+	exit 2
+fi
 POLICY=${SROIAAA_POLICY:-"$ROOT/configs/broker-policy.example.json"}
 BIN=${SROIAAA_BIN:-"$ROOT/runtime"}
 
