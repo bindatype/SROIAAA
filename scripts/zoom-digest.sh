@@ -40,7 +40,16 @@ ONLY=${1:-}
 #
 # ~/.config/sroiaaa/env is sourced explicitly and not from ~/.bashrc, so a
 # fresh shell has none of these. That is the usual cause.
-required="SROIAAA_MINDROUTER_ENDPOINT MINDROUTER_API_KEY SROIAAA_WAZUH_CRITICAL_GROUPS"
+#
+# It matters most under cron, which sources neither. A credential whose value
+# lives in ~/.bashrc is simply absent at 04:45, and a question answered without
+# one fails in a way that reads like a broken source rather than a missing
+# secret. Every variable the digest needs is listed here so that failure is
+# loud and names itself.
+required="SROIAAA_MINDROUTER_ENDPOINT MINDROUTER_API_KEY SROIAAA_WAZUH_CRITICAL_GROUPS
+	ZABBIX_RO_TOKEN SROIAAA_ZABBIX_ENDPOINT
+	WAZUH_API_USERNAME WAZUH_API_PASSWORD SROIAAA_WAZUH_ENDPOINT
+	SROIAAA_PEGASUS_DSN"
 [ "$DRY" -eq 1 ] || required="$required SROIAAA_ZOOM_WEBHOOK_URL"
 missing=
 for var in $required; do
