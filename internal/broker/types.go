@@ -72,6 +72,34 @@ type RouteRequest struct {
 	// for issues "on May 21st" with only a lower bound returned everything from
 	// May to now, sorted by recency, so the answer described today.
 	Until string `json:"until,omitempty"`
+	// Match narrows monitoring evidence to problems whose name contains this
+	// text. It is the difference between a question and a page: asked which
+	// hosts lost their Zabbix agent since 05:00, the only available move was to
+	// fetch the newest 25 of 1,200 events and hope the relevant ones were among
+	// them. They were not, and nothing in the result said so.
+	//
+	// Like Query this is authored rather than chosen, and like Query it is
+	// bounded by what it reaches: a substring filter over a name column cannot
+	// widen the request beyond the intent that carries it.
+	Match string `json:"match,omitempty"`
+	// Severity is the floor, named rather than numbered: "warning" and above,
+	// "high" and above. The census already reports the breakdown, so a reader
+	// asking only about disasters was being handed 25 rows of information-level
+	// noise and a count they had to filter by eye.
+	Severity string `json:"severity,omitempty"`
+	// State selects problems that are still open or ones that have closed.
+	// Applies to monitoring.history, whose event log carries both: an incident
+	// that opened and resolved within the window appears twice, and "what broke
+	// this morning" and "what is still broken" are different questions asked of
+	// the same rows.
+	State string `json:"state,omitempty"`
+	// Limit is how many rows to return, up to MaxMonitoringLimit. It exists
+	// because the default is a sample and was being read as a population. It is
+	// still a page: raising it far enough to hold 1,200 events would overrun
+	// the evidence budget, so the honest answers to a large result are a
+	// narrower filter and the aggregates computed alongside it, not a bigger
+	// page.
+	Limit int `json:"limit,omitempty"`
 }
 
 type RoutePlan struct {
@@ -89,6 +117,9 @@ type RouteStep struct {
 	Query     string           `json:"query,omitempty"`
 	Since     string           `json:"since,omitempty"`
 	Until     string           `json:"until,omitempty"`
+	Match     string           `json:"match,omitempty"`
+	Severity  string           `json:"severity,omitempty"`
+	State     string           `json:"state,omitempty"`
 	Target    *OperationTarget `json:"target,omitempty"`
 	Params    *OperationParams `json:"params,omitempty"`
 }

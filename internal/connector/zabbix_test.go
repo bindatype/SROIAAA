@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -270,5 +271,268 @@ func TestZabbixDistinguishesUnknownHostFromHealthyHost(t *testing.T) {
 				t.Errorf("host_known = %v (present=%v), want %d", got, ok, test.want)
 			}
 		})
+	}
+}
+
+// classifyZabbixCall names which of the three round trips a request body is.
+//
+// The connector makes up to three calls per step -- the page, the severity
+// census, and the per-host census -- and they are distinguished by what they
+// ask for rather than by call order, so a test does not silently pass when the
+// order changes.
+func classifyZabbixCall(t *testing.T, body []byte) (string, map[string]any) {
+	t.Helper()
+	var request struct {
+		Method string         `json:"method"`
+		Params map[string]any `json:"params"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+	params := request.Params
+	_, hasHosts := params["selectHosts"]
+	output, _ := params["output"].([]any)
+	first := ""
+	if len(output) > 0 {
+		first, _ = output[0].(string)
+	}
+	switch {
+	case !hasHosts && (first == "severity" || first == "priority"):
+		return "severity-census", params
+	case hasHosts && (first == "eventid" || first == "triggerid") && len(output) == 1:
+		return "host-census", params
+	default:
+		return "page", params
+	}
+}
+
+func TestZabbixAppliesSelectorsToTheAPICall(t *testing.T) {
+	// Each selector has a different spelling per method, which is the detail a
+	// caller must not have to carry. A selector that never reaches the API
+	// returns a wide result that reads as a narrow one.
+	var pageParams map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		kind, params := classifyZabbixCall(t, body)
+		if kind == "page" {
+			pageParams = params
+			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[]}`)
+			return
+		}
+		io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[]}`)
+	}))
+	defer server.Close()
+
+	connector := newTestZabbix(t, server.URL)
+	evidence, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source:   broker.SourceZabbixAPI,
+		Action:   "event.get",
+		Limit:    25,
+		Since:    "2026-08-29T05:00:00Z",
+		Match:    "Zabbix agent is not available",
+		Severity: "average",
+		State:    "problem",
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	search, ok := pageParams["search"].(map[string]any)
+	if !ok || search["name"] != "Zabbix agent is not available" {
+		t.Errorf("event.get search = %v, want a substring filter on name", pageParams["search"])
+	}
+	severities, ok := pageParams["severities"].([]any)
+	if !ok || len(severities) != 3 {
+		t.Errorf("severities = %v, want average and worse (3, 4, 5)", pageParams["severities"])
+	}
+	value, ok := pageParams["value"].([]any)
+	if !ok || len(value) != 1 || value[0].(float64) != 1 {
+		t.Errorf("value = %v, want [1] for problems opening", pageParams["value"])
+	}
+
+	// The evidence echoes what was applied, for the same reason it echoes
+	// since: a filter absent here was not applied, whatever was requested.
+	if evidence.Match != "Zabbix agent is not available" || evidence.Severity != "average" || evidence.State != "problem" {
+		t.Errorf("evidence does not echo the selectors: %q %q %q", evidence.Match, evidence.Severity, evidence.State)
+	}
+}
+
+func TestZabbixTriggerSelectorsUseTheTriggerSpelling(t *testing.T) {
+	var pageParams map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		kind, params := classifyZabbixCall(t, body)
+		if kind == "page" {
+			pageParams = params
+		}
+		io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[]}`)
+	}))
+	defer server.Close()
+
+	connector := newTestZabbix(t, server.URL)
+	if _, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source:   broker.SourceZabbixAPI,
+		Action:   "trigger.get",
+		Limit:    25,
+		Match:    "*disk*",
+		Severity: "high",
+	}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	search, ok := pageParams["search"].(map[string]any)
+	if !ok {
+		t.Fatalf("trigger.get sent no search: %v", pageParams)
+	}
+	// Zabbix wraps the value in wildcards itself. Passing the caller's stars
+	// through would search for literal asterisks and confidently return nothing.
+	if search["description"] != "disk" {
+		t.Errorf("trigger.get search = %v, want description filtered on the bare substring", search)
+	}
+	if pageParams["min_severity"].(float64) != 4 {
+		t.Errorf("min_severity = %v, want 4 for high", pageParams["min_severity"])
+	}
+}
+
+func TestZabbixCountsMatchingRowsByHostWhenTruncated(t *testing.T) {
+	// The answer to 1,200 matching events is not a longer page. It is which
+	// hosts they landed on, counted over every matching row rather than over
+	// the 25 that fit.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		kind, _ := classifyZabbixCall(t, body)
+		switch kind {
+		case "severity-census":
+			rows := make([]string, 0, 6)
+			for i := 0; i < 6; i++ {
+				rows = append(rows, `{"severity":"3"}`)
+			}
+			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[`+strings.Join(rows, ",")+`]}`)
+		case "host-census":
+			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[
+				{"hosts":[{"host":"dss01"}]},{"hosts":[{"host":"dss01"}]},{"hosts":[{"host":"dss01"}]},
+				{"hosts":[{"host":"dss02"}]},{"hosts":[{"host":"dss02"}]},
+				{"hosts":[{"host":"mgt01"}]}
+			]}`)
+		default:
+			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[
+				{"eventid":"1","clock":"1756300000","name":"Zabbix agent is not available","severity":"3","value":"1","hosts":[{"host":"dss01"}]}
+			]}`)
+		}
+	}))
+	defer server.Close()
+
+	connector := newTestZabbix(t, server.URL)
+	evidence, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceZabbixAPI,
+		Action: "event.get",
+		Limit:  1,
+		Since:  "2026-08-29T05:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !evidence.Truncated {
+		t.Fatal("6 matching rows and 1 returned is truncated")
+	}
+	hosts := evidence.Breakdown["events_by_host"]
+	if len(hosts) != 3 {
+		t.Fatalf("events_by_host = %v, want three hosts", hosts)
+	}
+	if hosts["dss01"] != 3 || hosts["dss02"] != 2 || hosts["mgt01"] != 1 {
+		t.Errorf("events_by_host = %v, want counts over all matching rows, not the page", hosts)
+	}
+	if evidence.Summary["hosts_affected"] != 3 {
+		t.Errorf("hosts_affected = %d, want 3", evidence.Summary["hosts_affected"])
+	}
+}
+
+func TestZabbixSkipsTheHostCensusWhenThePageIsComplete(t *testing.T) {
+	// The extra round trip buys nothing when every matching row is already in
+	// the evidence: the hosts can be read off the items.
+	calls := map[string]int{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		kind, _ := classifyZabbixCall(t, body)
+		calls[kind]++
+		if kind == "severity-census" {
+			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[{"severity":"3"}]}`)
+			return
+		}
+		io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[
+			{"eventid":"1","clock":"1756300000","name":"Agent down","severity":"3","value":"1","hosts":[{"host":"dss01"}]}
+		]}`)
+	}))
+	defer server.Close()
+
+	connector := newTestZabbix(t, server.URL)
+	evidence, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceZabbixAPI,
+		Action: "event.get",
+		Limit:  25,
+		Since:  "2026-08-29T05:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if evidence.Truncated {
+		t.Fatal("one matching row and one returned is not truncated")
+	}
+	if calls["host-census"] != 0 {
+		t.Errorf("host census ran %d times for a complete page", calls["host-census"])
+	}
+	if evidence.Breakdown != nil {
+		t.Errorf("Breakdown = %v, want none when the page holds every matching row", evidence.Breakdown)
+	}
+}
+
+func TestZabbixWarnsWhenTheHostBreakdownIsPartial(t *testing.T) {
+	// A breakdown naming 25 of 60 hosts, presented as the whole picture, is a
+	// more convincing wrong answer than no breakdown at all.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		kind, _ := classifyZabbixCall(t, body)
+		switch kind {
+		case "severity-census":
+			rows := make([]string, 0, 60)
+			for i := 0; i < 60; i++ {
+				rows = append(rows, `{"severity":"2"}`)
+			}
+			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[`+strings.Join(rows, ",")+`]}`)
+		case "host-census":
+			rows := make([]string, 0, 60)
+			for i := 0; i < 60; i++ {
+				rows = append(rows, fmt.Sprintf(`{"hosts":[{"host":"node%02d"}]}`, i))
+			}
+			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[`+strings.Join(rows, ",")+`]}`)
+		default:
+			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":[
+				{"eventid":"1","clock":"1756300000","name":"Agent down","severity":"2","value":"1","hosts":[{"host":"node00"}]}
+			]}`)
+		}
+	}))
+	defer server.Close()
+
+	connector := newTestZabbix(t, server.URL)
+	evidence, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceZabbixAPI,
+		Action: "event.get",
+		Limit:  1,
+		Since:  "2026-08-29T05:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got := len(evidence.Breakdown["events_by_host"]); got != maxBreakdownHosts {
+		t.Errorf("events_by_host holds %d hosts, want it capped at %d", got, maxBreakdownHosts)
+	}
+	if evidence.Summary["hosts_affected"] != 60 {
+		t.Errorf("hosts_affected = %d, want the full count even though the names are capped", evidence.Summary["hosts_affected"])
+	}
+	if len(evidence.Warnings) == 0 {
+		t.Fatal("a capped breakdown carried no warning, so it reads as the whole picture")
+	}
+	if !strings.Contains(evidence.Warnings[0], "60") {
+		t.Errorf("warning does not say how many hosts were left unnamed: %q", evidence.Warnings[0])
 	}
 }

@@ -109,6 +109,38 @@ func ToolDefinition(intents []string) any {
 							"or a window such as 24h or 7d. Use it for any question about a time period. " +
 							"Not for database.query, which bounds time in its WHERE clause.",
 					},
+					"match": map[string]any{
+						"type": "string",
+						"description": "Narrow monitoring evidence to problems whose name contains this text, " +
+							"case-insensitively, as a plain substring rather than a pattern. " +
+							"For monitoring.problems and monitoring.history only. " +
+							"Reach for it whenever the question names a kind of problem: " +
+							"match \"Zabbix agent is not available\" rather than reading a general page and looking for it.",
+					},
+					"severity": map[string]any{
+						"type": "string",
+						"enum": broker.SeverityNames(),
+						"description": "Return only problems at this level or worse. " +
+							"For monitoring.problems and monitoring.history only.",
+					},
+					"state": map[string]any{
+						"type": "string",
+						"enum": []string{broker.StateProblem, broker.StateResolved},
+						"description": "For monitoring.history only. The event log records both an incident opening " +
+							"and its closing, so one incident inside the window appears twice. " +
+							"Choose \"problem\" for what broke and \"resolved\" for what recovered; omit for both.",
+					},
+					"limit": map[string]any{
+						"type":    "integer",
+						"minimum": 1,
+						"maximum": broker.MaxMonitoringLimit,
+						"description": fmt.Sprintf(
+							"How many rows to return, default %d, maximum %d. "+
+								"For monitoring.problems and monitoring.history only. "+
+								"Raising it does not make a large result answerable: read total_matching and "+
+								"breakdown, and narrow with match, severity, or a tighter window instead.",
+							broker.DefaultMonitoringLimit, broker.MaxMonitoringLimit),
+					},
 				},
 				"required":             []string{"intent"},
 				"additionalProperties": false,

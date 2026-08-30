@@ -30,7 +30,15 @@ type Evidence struct {
 	// Until is the upper bound applied. Without one a window is a ray: a
 	// request for issues on a single past day returned everything from that day
 	// to now, sorted by recency, so the answer described today.
-	Until       string    `json:"until,omitempty"`
+	Until string `json:"until,omitempty"`
+	// Match, Severity, and State record the selectors the source actually
+	// applied, for the same reason Since is recorded: a request narrowed by a
+	// filter reads its result as narrow. If a filter was asked for and does not
+	// appear here, it was not applied, and the rows describe a wider question
+	// than the one asked.
+	Match       string    `json:"match,omitempty"`
+	Severity    string    `json:"severity,omitempty"`
+	State       string    `json:"state,omitempty"`
 	RequestedAt time.Time `json:"requested_at"`
 	DurationMS  int64     `json:"duration_ms"`
 	ItemCount   int       `json:"item_count"`
@@ -52,9 +60,20 @@ type Evidence struct {
 	// which was posted to a channel while five of them were.
 	//
 	// A warning is a defect in the answer, not a footnote to it.
-	Warnings  []string       `json:"warnings,omitempty"`
-	Truncated bool           `json:"truncated"`
-	Items     []EvidenceItem `json:"items"`
+	Warnings []string `json:"warnings,omitempty"`
+	// Breakdown holds named aggregate tables computed here, in code, over every
+	// matching row rather than over the returned page.
+	//
+	// It exists because a large result is not answerable by showing more of it.
+	// Asked which systems were degraded one morning, the only available reply
+	// was the newest 25 of 1,200 events, which named a handful of hosts and
+	// implied the rest were fine. The rows cannot be widened far enough to fix
+	// that -- 1,200 of them would overrun the evidence budget and be discarded
+	// whole -- but the question was never about the rows. It was "which hosts,
+	// and how many each", and that is a table code can compute exactly.
+	Breakdown map[string]map[string]int `json:"breakdown,omitempty"`
+	Truncated bool                      `json:"truncated"`
+	Items     []EvidenceItem            `json:"items"`
 }
 
 // EvidenceItem is one normalized record. Connectors map source-specific

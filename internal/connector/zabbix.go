@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/maclach/sroiaaa/internal/broker"
@@ -22,6 +24,15 @@ const (
 	// per matching row, so a few thousand is cheap, but it must still be
 	// bounded: an unbounded fetch is the thing every other limit here prevents.
 	maxCensusRows = 20000
+	// maxHostCensusRows bounds the per-host breakdown. It carries a host object
+	// per row rather than a single integer, so it costs several times what the
+	// severity census does and cannot share its ceiling without risking the
+	// response cap -- which fails the whole step rather than shortening it.
+	maxHostCensusRows = 5000
+	// maxBreakdownHosts keeps the breakdown itself from becoming the thing that
+	// overruns the evidence budget. The hosts that matter are the ones with the
+	// most events; the tail is reported as a count, not as names.
+	maxBreakdownHosts = 25
 )
 
 // zabbixMethods is the fixed action table. A plan may only name an action that
@@ -146,6 +157,9 @@ func (c *ZabbixConnector) Execute(ctx context.Context, step broker.RouteStep) (E
 		}
 		params["lastChangeTill"] = moment.Unix()
 	}
+	if err := applySelectors(params, method, step); err != nil {
+		return Evidence{}, err
+	}
 
 	requestedAt := time.Now().UTC()
 	result, _, err := c.call(ctx, method, params)
@@ -179,12 +193,14 @@ func (c *ZabbixConnector) Execute(ctx context.Context, step broker.RouteStep) (E
 		}
 	}
 
-	return Evidence{
+	evidence := Evidence{
 		Source:         string(broker.SourceZabbixAPI),
 		Action:         step.Action,
 		Endpoint:       redactEndpoint(c.endpoint),
 		Since:          step.Since,
 		Until:          step.Until,
+		Match:          step.Match,
+		Severity:       step.Severity,
 		RequestedAt:    requestedAt,
 		DurationMS:     time.Since(requestedAt).Milliseconds(),
 		ItemCount:      len(items),
@@ -192,7 +208,13 @@ func (c *ZabbixConnector) Execute(ctx context.Context, step broker.RouteStep) (E
 		Truncated:      total > len(items),
 		Summary:        summary,
 		Items:          items,
-	}, nil
+	}
+	if evidence.Truncated {
+		if err := c.attachHostBreakdown(ctx, &evidence, method, params, total); err != nil {
+			return Evidence{}, err
+		}
+	}
+	return evidence, nil
 }
 
 // executeEvents answers from the event log rather than current trigger state.
@@ -218,6 +240,9 @@ func (c *ZabbixConnector) executeEvents(ctx context.Context, step broker.RouteSt
 	}
 	if !till.IsZero() {
 		params["time_till"] = till.Unix()
+	}
+	if err := applySelectors(params, "event.get", step); err != nil {
+		return Evidence{}, err
 	}
 
 	requestedAt := time.Now().UTC()
@@ -283,12 +308,15 @@ func (c *ZabbixConnector) executeEvents(ctx context.Context, step broker.RouteSt
 		summary[severity] = count
 	}
 
-	return Evidence{
+	evidence := Evidence{
 		Source:         string(broker.SourceZabbixAPI),
 		Action:         step.Action,
 		Endpoint:       redactEndpoint(c.endpoint),
 		Since:          step.Since,
 		Until:          step.Until,
+		Match:          step.Match,
+		Severity:       step.Severity,
+		State:          step.State,
 		RequestedAt:    requestedAt,
 		DurationMS:     time.Since(requestedAt).Milliseconds(),
 		ItemCount:      len(items),
@@ -296,7 +324,191 @@ func (c *ZabbixConnector) executeEvents(ctx context.Context, step broker.RouteSt
 		Truncated:      total > len(items),
 		Summary:        summary,
 		Items:          items,
-	}, nil
+	}
+	if evidence.Truncated {
+		if err := c.attachHostBreakdown(ctx, &evidence, "event.get", params, total); err != nil {
+			return Evidence{}, err
+		}
+	}
+	return evidence, nil
+}
+
+// applySelectors adds the request's narrowing filters to a set of API
+// parameters.
+//
+// The two methods spell the same three ideas differently, which is exactly the
+// kind of detail a caller should not have to carry: trigger.get takes a
+// severity floor as min_severity, event.get takes an explicit list; the
+// searchable column is description on one and name on the other; and only the
+// event log has a resolved state to select at all.
+func applySelectors(params map[string]any, method string, step broker.RouteStep) error {
+	if step.Match != "" {
+		column := "description"
+		if method == "event.get" {
+			column = "name"
+		}
+		// Zabbix binds the value and wraps it in wildcards, so this is a
+		// substring filter rather than a pattern language. A caller who writes
+		// "*agent*" gets rows containing literal asterisks, which is to say
+		// none, so the stars are stripped rather than passed through to produce
+		// a confident empty result.
+		//
+		// On trigger.get the search runs against the stored description, while
+		// expandDescription resolves macros only in what comes back. So a
+		// trigger displayed as "Zabbix agent is not available on node01" is
+		// stored as "... on {HOST.NAME}", and matching the literal part works
+		// while matching the hostname does not. Filter by host instead.
+		params["search"] = map[string]any{column: strings.Trim(step.Match, "*")}
+	}
+	if step.Severity != "" {
+		floor, ok := broker.SeverityFloor(step.Severity)
+		if !ok {
+			return newConnectorError("invalid_severity", fmt.Sprintf("severity %q is not a known level", step.Severity))
+		}
+		if method == "event.get" {
+			levels := make([]int, 0, 6)
+			for level := floor; level <= 5; level++ {
+				levels = append(levels, level)
+			}
+			params["severities"] = levels
+		} else {
+			params["min_severity"] = floor
+		}
+	}
+	if step.State != "" {
+		if method != "event.get" {
+			return newConnectorError("unsupported_filter", "only the event log records a resolved state")
+		}
+		// 1 is a problem starting, 0 is one resolving.
+		value := 1
+		if step.State == broker.StateResolved {
+			value = 0
+		}
+		params["value"] = []int{value}
+	}
+	return nil
+}
+
+// hostCensus counts matching rows by host.
+//
+// It runs only when the page is short of the population, because that is the
+// only time it changes an answer: when every matching row is already in the
+// evidence, a model can be trusted to read the hosts off them, and the extra
+// round trip buys nothing.
+//
+// The subset it examines is the most recent maxHostCensusRows, ordered
+// explicitly rather than left to the server, so that a capped census can be
+// described precisely instead of being reported as though it covered
+// everything.
+func (c *ZabbixConnector) hostCensus(ctx context.Context, method string, params map[string]any) (map[string]int, int, error) {
+	censusParams := make(map[string]any, len(params))
+	for key, value := range params {
+		switch key {
+		case "limit", "output", "sortfield", "sortorder", "selectHosts", "expandDescription":
+			continue
+		}
+		censusParams[key] = value
+	}
+	censusParams["output"] = []string{"triggerid"}
+	censusParams["sortfield"] = "lastchange"
+	if method == "event.get" {
+		censusParams["output"] = []string{"eventid"}
+		censusParams["sortfield"] = "clock"
+	}
+	censusParams["sortorder"] = "DESC"
+	censusParams["selectHosts"] = []string{"host"}
+	censusParams["limit"] = maxHostCensusRows
+
+	payload, err := c.rawCall(ctx, method, censusParams)
+	if err != nil {
+		return nil, 0, err
+	}
+	var envelope struct {
+		Result []struct {
+			Hosts []struct {
+				Host string `json:"host"`
+			} `json:"hosts"`
+		} `json:"result"`
+		Error *struct {
+			Message string `json:"message"`
+			Data    string `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return nil, 0, newConnectorError("decode_response", err.Error())
+	}
+	if envelope.Error != nil {
+		return nil, 0, newConnectorError("zabbix_error", envelope.Error.Message+": "+envelope.Error.Data)
+	}
+
+	counts := make(map[string]int)
+	for _, row := range envelope.Result {
+		host := "unknown"
+		if len(row.Hosts) > 0 {
+			host = row.Hosts[0].Host
+		}
+		counts[host]++
+	}
+	return counts, len(envelope.Result), nil
+}
+
+// topHosts trims a host census to the busiest maxBreakdownHosts entries.
+//
+// Ties are broken by name so that two runs over the same data produce the same
+// table; an aggregate that reshuffles between runs invites a reader to see
+// movement that is not there.
+func topHosts(counts map[string]int) map[string]int {
+	if len(counts) <= maxBreakdownHosts {
+		return counts
+	}
+	type entry struct {
+		host  string
+		count int
+	}
+	entries := make([]entry, 0, len(counts))
+	for host, count := range counts {
+		entries = append(entries, entry{host, count})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].count != entries[j].count {
+			return entries[i].count > entries[j].count
+		}
+		return entries[i].host < entries[j].host
+	})
+	trimmed := make(map[string]int, maxBreakdownHosts)
+	for _, e := range entries[:maxBreakdownHosts] {
+		trimmed[e.host] = e.count
+	}
+	return trimmed
+}
+
+// attachHostBreakdown runs the host census and records it, together with a
+// warning whenever the census itself was capped -- because a partial breakdown
+// presented as a whole one is a more convincing wrong answer than no breakdown
+// at all.
+func (c *ZabbixConnector) attachHostBreakdown(ctx context.Context, evidence *Evidence, method string, params map[string]any, total int) error {
+	counts, examined, err := c.hostCensus(ctx, method, params)
+	if err != nil {
+		return err
+	}
+	evidence.Summary["hosts_affected"] = len(counts)
+	if evidence.Breakdown == nil {
+		evidence.Breakdown = make(map[string]map[string]int, 1)
+	}
+	evidence.Breakdown["events_by_host"] = topHosts(counts)
+	if len(counts) > maxBreakdownHosts {
+		evidence.Warnings = append(evidence.Warnings, fmt.Sprintf(
+			"events_by_host names only the %d hosts with the most rows, of %d hosts affected; "+
+				"the remainder are counted in hosts_affected but not named",
+			maxBreakdownHosts, len(counts)))
+	}
+	if examined >= maxHostCensusRows && total > examined {
+		evidence.Warnings = append(evidence.Warnings, fmt.Sprintf(
+			"events_by_host covers the most recent %d rows, not all %d that matched; "+
+				"the per-host counts are a lower bound, so do not present them as totals",
+			examined, total))
+	}
+	return nil
 }
 
 // windowOf parses the bounds a step carries.

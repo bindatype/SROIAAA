@@ -68,6 +68,12 @@ func TestPromptRetainsItsHardWonRules(t *testing.T) {
 			"the prompt previously implied its own table list was exhaustive"},
 		{"collapse rows",
 			"an uncollapsed window function filled the result with duplicates"},
+		{"breakdown.events_by_host",
+			"asked which systems were degraded, a model read a host list off the 25-row page and implied the rest were fine"},
+		{"appears twice in the event log",
+			"counting event rows without a state filter double-counts every incident that opened and closed in the window"},
+		{"not answered by asking for more rows",
+			"a large result is characterized by the aggregates; raising the limit past the budget returns nothing at all"},
 	}
 	for _, rule := range rules {
 		if !strings.Contains(systemPrompt, rule.needle) {

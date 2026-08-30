@@ -8,9 +8,8 @@ import (
 )
 
 const (
-	planVersion          = 1
-	fleetInventoryLimit  = 500
-	monitoringIssueLimit = 25
+	planVersion         = 1
+	fleetInventoryLimit = 500
 )
 
 type Router struct {
@@ -61,6 +60,21 @@ func (r *Router) Plan(request RouteRequest) (RoutePlan, error) {
 	}
 	if !until.IsZero() {
 		untilValue = until.Format(time.RFC3339)
+	}
+
+	// The monitoring selectors are honoured by the two Zabbix intents and by
+	// nothing else. Silently ignoring them elsewhere is the failure this
+	// codebase keeps finding: a request narrowed by a filter that was never
+	// applied comes back wide, and a wide result read as a narrow one is wrong
+	// in the direction that looks right.
+	switch request.Intent {
+	case IntentMonitoringProblems, IntentMonitoringHistory:
+	default:
+		if request.Match != "" || request.Severity != "" || request.State != "" || request.Limit != 0 {
+			return RoutePlan{}, newRouteError("invalid_request",
+				fmt.Sprintf("%s does not accept match, severity, state, or limit; "+
+					"those apply to monitoring.problems and monitoring.history", request.Intent))
+		}
 	}
 
 	switch request.Intent {
@@ -118,13 +132,19 @@ func (r *Router) Plan(request RouteRequest) (RoutePlan, error) {
 				return RoutePlan{}, newRouteError("invalid_host", err.Error())
 			}
 		}
+		match, severity, _, limit, err := monitoringSelectors(request, false)
+		if err != nil {
+			return RoutePlan{}, err
+		}
 		return newPlan(request.Intent, RouteStep{
-			Source: SourceZabbixAPI,
-			Action: "trigger.get",
-			Host:   request.Host,
-			Limit:  monitoringIssueLimit,
-			Since:  sinceValue,
-			Until:  untilValue,
+			Source:   SourceZabbixAPI,
+			Action:   "trigger.get",
+			Host:     request.Host,
+			Limit:    limit,
+			Since:    sinceValue,
+			Until:    untilValue,
+			Match:    match,
+			Severity: severity,
 		}), nil
 
 	case IntentDatabaseQuery:
@@ -165,13 +185,20 @@ func (r *Router) Plan(request RouteRequest) (RoutePlan, error) {
 		if sinceValue == "" {
 			return RoutePlan{}, newRouteError("missing_since", "monitoring.history requires since, and usually until")
 		}
+		match, severity, state, limit, err := monitoringSelectors(request, true)
+		if err != nil {
+			return RoutePlan{}, err
+		}
 		return newPlan(request.Intent, RouteStep{
-			Source: SourceZabbixAPI,
-			Action: "event.get",
-			Host:   request.Host,
-			Limit:  monitoringIssueLimit,
-			Since:  sinceValue,
-			Until:  untilValue,
+			Source:   SourceZabbixAPI,
+			Action:   "event.get",
+			Host:     request.Host,
+			Limit:    limit,
+			Since:    sinceValue,
+			Until:    untilValue,
+			Match:    match,
+			Severity: severity,
+			State:    state,
 		}), nil
 
 	case IntentLiveEvidence:
@@ -293,9 +320,15 @@ func (r *Router) candidateRequests(plan RoutePlan) []RouteRequest {
 		return []RouteRequest{{Intent: plan.Intent, Host: host}}
 
 	case IntentMonitoringProblems, IntentMonitoringHistory:
+		// The selectors are carried verbatim in the plan rather than resolved
+		// from policy, so reconstruction reads them back. Validation runs again
+		// during the replan: a limit inflated after planning fails to
+		// reconstruct, because the router refuses to produce that plan.
 		return []RouteRequest{{
 			Intent: plan.Intent, Host: host,
 			Since: plan.Steps[0].Since, Until: plan.Steps[0].Until,
+			Match: plan.Steps[0].Match, Severity: plan.Steps[0].Severity,
+			State: plan.Steps[0].State, Limit: plan.Steps[0].Limit,
 		}}
 
 	case IntentDatabaseQuery:

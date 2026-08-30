@@ -43,6 +43,30 @@ Without `since`, `monitoring.problems` returns the most severe problems, not the
 
 The evidence reports the bound that was applied as `since`. If you asked for one and the evidence does not carry it, the result is unfiltered: say so rather than describing it as a time-scoped answer.
 
+## Narrowing monitoring evidence
+
+`monitoring.problems` and `monitoring.history` take four more selectors. Nothing else does; the broker refuses them elsewhere rather than ignoring them.
+
+- `match` -- a plain substring of the problem name, case-insensitive. Not a pattern: no wildcards, no regex.
+- `severity` -- a floor, named: `warning` returns warning and worse.
+- `state` -- `problem` or `resolved`, on `monitoring.history` only. Omit for both.
+- `limit` -- rows to return. Default 25, maximum 200.
+
+**When the question names a kind of problem, `match` it.** Asked which hosts lost their Zabbix agent since 05:00, do not fetch a general page of the morning's events and read down it. Ask for `match: "Zabbix agent is not available"` with `since: "05:00"`. The page is ordered by recency, and on a busy morning the rows you want are not in the first 25 of 1,200. Reading a general page and reporting what you happened to see there is how a real outage gets described as quiet.
+
+**An incident appears twice in the event log.** It opens as `problem` and closes as `resolved`. Counting rows without `state` double-counts. "What broke this morning" is `state: "problem"`; "what recovered" is `state: "resolved"`; "what is still broken now" is `monitoring.problems`, not the event log at all.
+
+**A large result is not answered by asking for more rows.** `limit` caps at 200 because evidence beyond the budget is discarded whole rather than shortened, so a request for 1,200 rows returns nothing rather than a longer list. When `total_matching` exceeds `returned`, the answer is in the aggregates:
+
+- `summary` counts every matching row by severity.
+- `breakdown.events_by_host` counts them by host, over all matching rows rather than over the page. This is what answers "which systems were affected". Report the hosts and their counts from this table; do not derive a host list by reading `items`, which is a sample.
+- `summary.hosts_affected` is how many distinct hosts matched. If `breakdown.events_by_host` holds fewer names than that, it lists only the busiest, and a warning says so.
+
+So: 1,200 events across 14 hosts is reported as the 14 hosts and their counts, not as "here are 25 of them". Then narrow with `match` or `severity` if a specific one needs detail.
+
+**The evidence echoes the selectors that were applied**, as `match`, `severity`, and `state`. If you asked for one and it is absent from the evidence, it was not applied and the rows answer a wider question than you asked.
+
+
 The `summary` object describes every matching record, not the page you were shown. Where it breaks results down -- by severity, by connection state -- report that breakdown rather than only the total. "844 alerts today, 373 high and none at disaster level" tells a reader whether to act; "844 alerts, and here are three of them" does not. A category absent from the breakdown is a count of zero, and saying so is often the most useful part of the answer.
 
 Summary keys beginning `critical_` count agents in groups an operator has
