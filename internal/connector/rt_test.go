@@ -1,0 +1,277 @@
+package connector
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/maclach/sroiaaa/internal/broker"
+)
+
+func TestRTConnectorSearchesOpenTicketsAndBreaksDownByQueue(t *testing.T) {
+	var capturedQueries []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "token rt-test-token" {
+			t.Errorf("Authorization = %q", got)
+		}
+		query := r.URL.Query().Get("query")
+		capturedQueries = append(capturedQueries, query)
+
+		if r.URL.Query().Get("per_page") == "1" {
+			// A queue-census probe: report a small exact total for whichever
+			// single queue this request named.
+			switch {
+			case strings.Contains(query, "Queue = 'Ops'"):
+				w.Write([]byte(`{"total":2,"items":[]}`))
+			case strings.Contains(query, "Queue = 'Helpdesk'"):
+				w.Write([]byte(`{"total":0,"items":[]}`))
+			default:
+				w.Write([]byte(`{"total":0,"items":[]}`))
+			}
+			return
+		}
+
+		w.Write([]byte(`{"total":2,"items":[
+			{"id":"101","Subject":"GPFS panic on node01","Status":"open","Queue":{"id":"Ops"},"Owner":{"id":"alice"},"Created":"2026-08-30T10:00:00Z","LastUpdated":"2026-08-30T11:00:00Z"},
+			{"id":"102","Subject":"disk full","Status":"new","Queue":"Ops","Owner":"Nobody","Created":"2026-08-29T09:00:00Z","LastUpdated":"2026-08-29T09:30:00Z"}
+		]}`))
+	}))
+	defer server.Close()
+
+	connector := newTestRT(t, server.URL, []string{"Ops", "Helpdesk"})
+	evidence, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceRequestTracker,
+		Action: "tickets.search",
+		Limit:  50,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if evidence.ItemCount != 2 {
+		t.Fatalf("ItemCount = %d, want 2", evidence.ItemCount)
+	}
+	if evidence.TotalAvailable != 2 {
+		t.Errorf("TotalAvailable = %d, want 2", evidence.TotalAvailable)
+	}
+	if evidence.Truncated {
+		t.Error("a complete result should not be marked truncated")
+	}
+	if evidence.Items[0].Description != "GPFS panic on node01" {
+		t.Errorf("Description = %q", evidence.Items[0].Description)
+	}
+	if evidence.Items[0].Fields["queue"] != "Ops" {
+		t.Errorf("queue field = %q, want Ops (from a hyperlink object)", evidence.Items[0].Fields["queue"])
+	}
+	if evidence.Items[1].Fields["queue"] != "Ops" {
+		t.Errorf("queue field = %q, want Ops (from a plain string)", evidence.Items[1].Fields["queue"])
+	}
+	if evidence.Items[0].State != "open" {
+		t.Errorf("State = %q, want open", evidence.Items[0].State)
+	}
+
+	// Ticket content must never appear anywhere in evidence.
+	encoded, _ := json.Marshal(evidence)
+	if strings.Contains(string(encoded), "Content") {
+		t.Error("evidence must not carry ticket content")
+	}
+
+	if evidence.Breakdown["tickets_by_queue"]["Ops"] != 2 {
+		t.Errorf("tickets_by_queue[Ops] = %d, want 2", evidence.Breakdown["tickets_by_queue"]["Ops"])
+	}
+	if _, present := evidence.Breakdown["tickets_by_queue"]["Helpdesk"]; present {
+		t.Error("a queue with zero matching tickets should be omitted, not present at zero")
+	}
+
+	// The search query is scoped to open statuses and every allowlisted queue.
+	if !strings.Contains(capturedQueries[0], "Status = 'new'") || !strings.Contains(capturedQueries[0], "Queue = 'Ops'") || !strings.Contains(capturedQueries[0], "Queue = 'Helpdesk'") {
+		t.Errorf("query = %q, want open statuses and both allowlisted queues", capturedQueries[0])
+	}
+}
+
+func TestRTConnectorFiltersByHostForTicketsByHost(t *testing.T) {
+	var capturedQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("per_page") == "1" {
+			w.Write([]byte(`{"total":0,"items":[]}`))
+			return
+		}
+		capturedQuery = r.URL.Query().Get("query")
+		w.Write([]byte(`{"total":1,"items":[
+			{"id":"200","Subject":"node01 GPFS panic since Aug 12","Status":"open","Queue":"Ops","Created":"2026-08-12T00:00:00Z"}
+		]}`))
+	}))
+	defer server.Close()
+
+	connector := newTestRT(t, server.URL, []string{"Ops"})
+	evidence, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceRequestTracker,
+		Action: "tickets.search",
+		Host:   "node01",
+		Limit:  50,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(capturedQuery, "Subject LIKE 'node01'") {
+		t.Errorf("query = %q, want a Subject filter on the host", capturedQuery)
+	}
+	if evidence.ItemCount != 1 {
+		t.Fatalf("ItemCount = %d, want 1", evidence.ItemCount)
+	}
+}
+
+func TestRTConnectorRejectsUnplannedAction(t *testing.T) {
+	connector := newTestRT(t, "https://rt.example.edu", []string{"Ops"})
+	_, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceRequestTracker,
+		Action: "ticket.comment",
+	})
+	var connErr *ConnectorError
+	if err == nil || !asConnectorError(err, &connErr) || connErr.Code != "unsupported_action" {
+		t.Fatalf("error = %v, want unsupported_action", err)
+	}
+}
+
+func TestRTConnectorRejectsWrongSource(t *testing.T) {
+	connector := newTestRT(t, "https://rt.example.edu", []string{"Ops"})
+	_, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceZabbixAPI,
+		Action: "tickets.search",
+	})
+	var connErr *ConnectorError
+	if err == nil || !asConnectorError(err, &connErr) || connErr.Code != "wrong_source" {
+		t.Fatalf("error = %v, want wrong_source", err)
+	}
+}
+
+func TestRTConnectorSurfacesAPIError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"message":"Invalid query"}`))
+	}))
+	defer server.Close()
+
+	connector := newTestRT(t, server.URL, []string{"Ops"})
+	_, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceRequestTracker,
+		Action: "tickets.search",
+	})
+	if err == nil || !strings.Contains(err.Error(), "Invalid query") {
+		t.Fatalf("error = %v, want the API message preserved", err)
+	}
+}
+
+func TestRTConnectorFailsClosedOnBadCredentials(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	connector := newTestRT(t, server.URL, []string{"Ops"})
+	_, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceRequestTracker,
+		Action: "tickets.search",
+	})
+	var connErr *ConnectorError
+	if err == nil || !asConnectorError(err, &connErr) || connErr.Code != "authentication_failed" {
+		t.Fatalf("error = %v, want authentication_failed", err)
+	}
+}
+
+func TestRTConnectorRejectsOversizedResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("per_page") == "1" {
+			w.Write([]byte(`{"total":0,"items":[]}`))
+			return
+		}
+		w.Write([]byte(`{"total":1,"items":[{"id":"1","Subject":"x","Status":"open"}]}`))
+	}))
+	defer server.Close()
+
+	connector, err := NewRTConnector(RTConfig{
+		Endpoint:         server.URL,
+		Token:            "rt-test-token",
+		Queues:           []string{"Ops"},
+		MaxResponseBytes: 8,
+	})
+	if err != nil {
+		t.Fatalf("NewRTConnector() error = %v", err)
+	}
+	_, err = connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceRequestTracker,
+		Action: "tickets.search",
+	})
+	var connErr *ConnectorError
+	if err == nil || !asConnectorError(err, &connErr) || connErr.Code != "response_too_large" {
+		t.Fatalf("error = %v, want response_too_large", err)
+	}
+}
+
+func TestRTConnectorRequiresConfiguration(t *testing.T) {
+	tests := []struct {
+		name   string
+		config RTConfig
+	}{
+		{"missing endpoint", RTConfig{Token: "t", Queues: []string{"Ops"}}},
+		{"missing token", RTConfig{Endpoint: "https://rt.example.edu", Queues: []string{"Ops"}}},
+		{"empty queue allowlist", RTConfig{Endpoint: "https://rt.example.edu", Token: "t"}},
+		{"queue allowlist of only blanks", RTConfig{Endpoint: "https://rt.example.edu", Token: "t", Queues: []string{"  ", ""}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := NewRTConnector(test.config); err == nil {
+				t.Fatal("expected configuration to be rejected")
+			}
+		})
+	}
+}
+
+func TestRTConnectorSkipsQueueCensusWhenAllowlistIsLarge(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"total":0,"items":[]}`))
+	}))
+	defer server.Close()
+
+	queues := make([]string, maxRTQueueCensus+1)
+	for i := range queues {
+		queues[i] = "Q" + string(rune('A'+i))
+	}
+	connector := newTestRT(t, server.URL, queues)
+	evidence, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceRequestTracker,
+		Action: "tickets.search",
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if evidence.Breakdown != nil {
+		t.Error("breakdown must not be computed above the queue-census cap")
+	}
+	if len(evidence.Warnings) == 0 || !strings.Contains(evidence.Warnings[0], "was not computed") {
+		t.Fatalf("warnings = %v, want a warning that the breakdown was skipped", evidence.Warnings)
+	}
+}
+
+func TestTicketSearchQueryEscapesQuotes(t *testing.T) {
+	query := ticketSearchQuery("o'brien", []string{"Ops"})
+	if !strings.Contains(query, `Subject LIKE 'o\'brien'`) {
+		t.Errorf("query = %q, want an escaped quote", query)
+	}
+}
+
+func newTestRT(t *testing.T, endpoint string, queues []string) *RTConnector {
+	t.Helper()
+	connector, err := NewRTConnector(RTConfig{
+		Endpoint: endpoint,
+		Token:    "rt-test-token",
+		Queues:   queues,
+	})
+	if err != nil {
+		t.Fatalf("NewRTConnector() error = %v", err)
+	}
+	return connector
+}

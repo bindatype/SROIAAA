@@ -9,15 +9,18 @@ const (
 	IntentLiveEvidence       Intent = "live.evidence"
 	IntentDatabaseQuery      Intent = "database.query"
 	IntentMonitoringHistory  Intent = "monitoring.history"
+	IntentTicketsOpen        Intent = "tickets.open"
+	IntentTicketsByHost      Intent = "tickets.for_host"
 )
 
 type Source string
 
 const (
-	SourceWazuhAPI  Source = "wazuh-api"
-	SourceZabbixAPI Source = "zabbix-api"
-	SourceSROIAAA   Source = "sroiaaa-agent"
-	SourcePegasusDB Source = "pegasus-db"
+	SourceWazuhAPI       Source = "wazuh-api"
+	SourceZabbixAPI      Source = "zabbix-api"
+	SourceSROIAAA        Source = "sroiaaa-agent"
+	SourcePegasusDB      Source = "pegasus-db"
+	SourceRequestTracker Source = "rt-api"
 )
 
 // SourceForIntent reports which data source an intent routes to. It lets a
@@ -35,6 +38,8 @@ func SourceForIntent(intent Intent) (Source, bool) {
 		return SourcePegasusDB, true
 	case IntentMonitoringHistory:
 		return SourceZabbixAPI, true
+	case IntentTicketsOpen, IntentTicketsByHost:
+		return SourceRequestTracker, true
 	default:
 		return "", false
 	}
@@ -49,6 +54,8 @@ func AllIntents() []Intent {
 		IntentLiveEvidence,
 		IntentDatabaseQuery,
 		IntentMonitoringHistory,
+		IntentTicketsOpen,
+		IntentTicketsByHost,
 	}
 }
 

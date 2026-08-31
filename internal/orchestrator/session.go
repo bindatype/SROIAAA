@@ -77,9 +77,11 @@ func ToolDefinition(intents []string) any {
 			"description": "Retrieve bounded, read-only infrastructure evidence through the SROIAAA policy broker. " +
 				"Covers Wazuh agent inventory and connection state; Zabbix triggers firing now and the Zabbix " +
 				"event log for a past window; a policy-approved file read from an authorized SROIAAA endpoint; " +
-				"and one read-only SQL SELECT against the pegasusdb HPC accounting database. " +
-				"Does NOT cover vulnerabilities or CVEs, installed packages, patch level, user accounts, " +
-				"configuration, performance metrics, or any file outside the policy's resource list. " +
+				"one read-only SQL SELECT against the pegasusdb HPC accounting database; and open Request " +
+				"Tracker tickets in allowlisted queues, metadata only. " +
+				"Does NOT cover vulnerabilities or CVEs, installed packages, patch level, log contents, user " +
+				"accounts, configuration, performance metrics or history, ticket content or correspondence, " +
+				"or any file outside the policy's resource list. " +
 				"Do not call this for questions it cannot answer.",
 			"parameters": map[string]any{
 				"type": "object",
@@ -91,7 +93,7 @@ func ToolDefinition(intents []string) any {
 					},
 					"host": map[string]any{
 						"type":        "string",
-						"description": "Host selector. Required for agent.status and live.evidence.",
+						"description": "Host selector. Required for agent.status, live.evidence, and tickets.for_host.",
 					},
 					"resource": map[string]any{
 						"type":        "string",

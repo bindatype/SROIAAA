@@ -10,6 +10,11 @@ import (
 const (
 	planVersion         = 1
 	fleetInventoryLimit = 500
+	// ticketSearchLimit bounds an RT ticket search. It is fixed rather than
+	// model-chosen, unlike the monitoring limit: a ticket list is answered by
+	// looking at what is open, not by tallying it, and RT's own total already
+	// tells a reader whether the page is complete.
+	ticketSearchLimit = 100
 )
 
 type Router struct {
@@ -204,6 +209,40 @@ func (r *Router) Plan(request RouteRequest) (RoutePlan, error) {
 	case IntentLiveEvidence:
 		return r.planLiveEvidence(request)
 
+	case IntentTicketsOpen:
+		if request.Host != "" || request.Resource != "" {
+			return RoutePlan{}, newRouteError("invalid_request", "tickets.open does not accept host or resource")
+		}
+		if request.Since != "" || request.Until != "" {
+			// Same trap as fleet.inventory: "open" is current ticket status, not
+			// a property of when the ticket was created. Bounding it by a time
+			// window would exclude a ticket opened outside that window but still
+			// sitting open today, and the narrower result would read as "quiet".
+			return RoutePlan{}, newRouteError("invalid_request",
+				"tickets.open reports tickets that are open right now and takes no since or until; "+
+					"a ticket does not stop being open because it was opened outside a window")
+		}
+		return newPlan(request.Intent, RouteStep{
+			Source: SourceRequestTracker,
+			Action: "tickets.search",
+			Limit:  ticketSearchLimit,
+		}), nil
+
+	case IntentTicketsByHost:
+		if err := requireHostOnly(request); err != nil {
+			return RoutePlan{}, err
+		}
+		if request.Since != "" || request.Until != "" {
+			return RoutePlan{}, newRouteError("invalid_request",
+				"tickets.for_host reports open tickets that mention this host and takes no since or until")
+		}
+		return newPlan(request.Intent, RouteStep{
+			Source: SourceRequestTracker,
+			Action: "tickets.search",
+			Host:   request.Host,
+			Limit:  ticketSearchLimit,
+		}), nil
+
 	default:
 		return RoutePlan{}, newRouteError("unknown_intent", fmt.Sprintf("intent %q is not supported", request.Intent))
 	}
@@ -364,6 +403,12 @@ func (r *Router) candidateRequests(plan RoutePlan) []RouteRequest {
 			})
 		}
 		return requests
+
+	case IntentTicketsOpen:
+		return []RouteRequest{{Intent: plan.Intent}}
+
+	case IntentTicketsByHost:
+		return []RouteRequest{{Intent: plan.Intent, Host: host}}
 
 	default:
 		return nil

@@ -31,6 +31,13 @@ const (
 	pegasusMaxRowsEnv      = "SROIAAA_PEGASUS_MAX_ROWS"
 	pegasusMaxBytesEnv     = "SROIAAA_PEGASUS_MAX_BYTES"
 	auditPathEnv           = "SROIAAA_BROKER_AUDIT"
+	rtEndpointEnv          = "SROIAAA_RT_ENDPOINT"
+	rtTokenEnv             = "RT_API_TOKEN"
+	// rtQueuesEnv names the RT queues this deployment allows searching, as a
+	// comma-separated list. Site configuration, not a connector default: RT
+	// queues are organization-specific and there is no safe default that
+	// includes any of them.
+	rtQueuesEnv = "SROIAAA_RT_QUEUES"
 
 	// defaultModel is chosen by scripts/eval_headtohead.py, which grades six
 	// question shapes rather than one: an aggregate, a grouped result that
@@ -62,6 +69,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	zabbixEndpoint := flags.String("zabbix-endpoint", os.Getenv(zabbixEndpointEnv), "Zabbix JSON-RPC endpoint URL")
 	wazuhEndpoint := flags.String("wazuh-endpoint", os.Getenv(wazuhEndpointEnv), "Wazuh API base URL")
 	wazuhInsecure := flags.Bool("wazuh-insecure", false, "skip TLS verification for the Wazuh API")
+	rtEndpoint := flags.String("rt-endpoint", os.Getenv(rtEndpointEnv), "Request Tracker REST 2.0 base URL")
 	showTrace := flags.Bool("trace", false, "print the policy decision trace to stderr")
 	auditPath := flags.String("audit", os.Getenv(auditPathEnv), "append a JSON-lines audit record for each question")
 	timeout := flags.Duration("timeout", 180*time.Second, "overall timeout")
@@ -93,7 +101,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	session, err := buildSession(*policyPath, *model, *endpoint, *zabbixEndpoint, *wazuhEndpoint, *wazuhInsecure)
+	session, err := buildSession(*policyPath, *model, *endpoint, *zabbixEndpoint, *wazuhEndpoint, *rtEndpoint, *wazuhInsecure)
 	if err != nil {
 		fmt.Fprintf(stderr, "sroiaaa-chat: %v\n", err)
 		return 2
@@ -131,7 +139,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func buildSession(policyPath, model, endpoint, zabbixEndpoint, wazuhEndpoint string, wazuhInsecure bool) (*orchestrator.Session, error) {
+func buildSession(policyPath, model, endpoint, zabbixEndpoint, wazuhEndpoint, rtEndpoint string, wazuhInsecure bool) (*orchestrator.Session, error) {
 	policyFile, err := os.Open(policyPath)
 	if err != nil {
 		return nil, fmt.Errorf("open policy: %w", err)
@@ -195,6 +203,17 @@ func buildSession(policyPath, model, endpoint, zabbixEndpoint, wazuhEndpoint str
 			return nil, err
 		}
 		connectors = append(connectors, pegasus)
+	}
+	if rtEndpoint != "" && os.Getenv(rtTokenEnv) != "" {
+		rt, err := connector.NewRTConnector(connector.RTConfig{
+			Endpoint: rtEndpoint,
+			Token:    os.Getenv(rtTokenEnv),
+			Queues:   splitList(os.Getenv(rtQueuesEnv)),
+		})
+		if err != nil {
+			return nil, err
+		}
+		connectors = append(connectors, rt)
 	}
 	if len(connectors) == 0 {
 		return nil, fmt.Errorf("no connectors configured; set Zabbix and/or Wazuh endpoints and credentials")

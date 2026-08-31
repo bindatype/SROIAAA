@@ -33,6 +33,18 @@ func TestRouterPlansCentralDataSources(t *testing.T) {
 			source:  SourceZabbixAPI,
 			action:  "trigger.get",
 		},
+		{
+			name:    "open tickets use the RT API",
+			request: RouteRequest{Intent: IntentTicketsOpen},
+			source:  SourceRequestTracker,
+			action:  "tickets.search",
+		},
+		{
+			name:    "tickets for a host use the RT API",
+			request: RouteRequest{Intent: IntentTicketsByHost, Host: "node01.example.edu"},
+			source:  SourceRequestTracker,
+			action:  "tickets.search",
+		},
 	}
 
 	for _, test := range tests {
@@ -115,6 +127,61 @@ func TestRouterDeniesUnauthorizedLiveRoutes(t *testing.T) {
 				t.Fatalf("expected %q, got %q", test.code, routeError.Code)
 			}
 		})
+	}
+}
+
+func TestRouterTicketIntentsRejectTimeBoundsAndWrongFields(t *testing.T) {
+	router := newTestRouter(t)
+	tests := []struct {
+		name    string
+		request RouteRequest
+	}{
+		{"open tickets reject host", RouteRequest{Intent: IntentTicketsOpen, Host: "node01.example.edu"}},
+		{"open tickets reject since", RouteRequest{Intent: IntentTicketsOpen, Since: "24h"}},
+		{"tickets for host require host", RouteRequest{Intent: IntentTicketsByHost}},
+		{"tickets for host reject resource", RouteRequest{Intent: IntentTicketsByHost, Host: "node01.example.edu", Resource: "x"}},
+		{"tickets for host reject since", RouteRequest{Intent: IntentTicketsByHost, Host: "node01.example.edu", Since: "2026-08-01"}},
+		{"tickets for host reject until", RouteRequest{Intent: IntentTicketsByHost, Host: "node01.example.edu", Until: "2026-08-02"}},
+		{"open tickets reject match", RouteRequest{Intent: IntentTicketsOpen, Match: "panic"}},
+		{"open tickets reject limit", RouteRequest{Intent: IntentTicketsOpen, Limit: 5}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := router.Plan(test.request); err == nil {
+				t.Fatalf("expected %+v to be rejected", test.request)
+			}
+		})
+	}
+}
+
+func TestRouterVerifyAcceptsTicketPlans(t *testing.T) {
+	router := newTestRouter(t)
+
+	openPlan, err := router.Plan(RouteRequest{Intent: IntentTicketsOpen})
+	if err != nil {
+		t.Fatalf("plan tickets.open: %v", err)
+	}
+	if err := router.Verify(openPlan); err != nil {
+		t.Fatalf("Verify(tickets.open) = %v", err)
+	}
+
+	hostPlan, err := router.Plan(RouteRequest{Intent: IntentTicketsByHost, Host: "node01.example.edu"})
+	if err != nil {
+		t.Fatalf("plan tickets.for_host: %v", err)
+	}
+	if err := router.Verify(hostPlan); err != nil {
+		t.Fatalf("Verify(tickets.for_host) = %v", err)
+	}
+
+	// A plan naming an unsupported action must still fail reconstruction: host
+	// is a free parameter here, like it is for agent.status and
+	// monitoring.problems, but the action table is not.
+	tampered := hostPlan
+	steps := append([]RouteStep(nil), tampered.Steps...)
+	steps[0].Action = "tickets.comment"
+	tampered.Steps = steps
+	if err := router.Verify(tampered); err == nil {
+		t.Fatal("Verify() accepted a tickets.for_host plan with a substituted action")
 	}
 }
 
@@ -444,6 +511,8 @@ func TestTimeBoundContract(t *testing.T) {
 		{"live.evidence refuses", RouteRequest{Intent: IntentLiveEvidence, Host: "node01.example.edu", Resource: "system-messages"}, false},
 		{"monitoring.problems accepts", RouteRequest{Intent: IntentMonitoringProblems}, true},
 		{"monitoring.history accepts", RouteRequest{Intent: IntentMonitoringHistory}, true},
+		{"tickets.open refuses", RouteRequest{Intent: IntentTicketsOpen}, false},
+		{"tickets.for_host refuses", RouteRequest{Intent: IntentTicketsByHost, Host: "node01.example.edu"}, false},
 	}
 
 	for _, test := range tests {

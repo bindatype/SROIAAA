@@ -47,7 +47,7 @@ cmd/sroiaaa-broker-exec/   executes a route plan against live sources
 cmd/sroiaaa-chat/          asks a question in natural language
 internal/agent/            API, execution, validation, audit logic
 internal/broker/           deterministic policy and routing kernel
-internal/connector/        Zabbix and Wazuh connectors, plan executor
+internal/connector/        Zabbix, Wazuh, and Request Tracker connectors, plan executor
 internal/orchestrator/     the model loop: intent in, evidence out
 configs/                   example broker policy
 docs/                      adding-a-connector.md
@@ -267,7 +267,11 @@ a swapped operation, or an extra step all fail verification.
 | `fleet.inventory` | Wazuh API `agents.list` |
 | `agent.status` | Wazuh API `agents.status` |
 | `monitoring.problems` | Zabbix API `trigger.get` |
+| `monitoring.history` | Zabbix API `event.get` |
 | `live.evidence` | A fixed SROIAAA operation from broker policy |
+| `database.query` | PegasusDB, one read-only `SELECT` |
+| `tickets.open` | RT API, open tickets in allowlisted queues |
+| `tickets.for_host` | RT API, open tickets whose subject names the host |
 
 MindRouter is used before routing to propose the structured intent and
 after evidence collection to synthesize an answer. It is not permitted to
@@ -327,14 +331,23 @@ suite.
 
 ### What it can and cannot answer
 
-Four intents, and nothing else:
+These intents, and nothing else:
 
 | Ask about | Intent | Source |
 |---|---|---|
 | agent inventory and connection state | `fleet.inventory` | Wazuh API |
 | one agent's state, by exact name | `agent.status` | Wazuh API |
 | active problem triggers, optionally per host | `monitoring.problems` | Zabbix API |
+| what happened during a past window | `monitoring.history` | Zabbix API (event log) |
 | a policy-approved file from an endpoint | `live.evidence` | SROIAAA agent (not yet built) |
+| aggregate/ad hoc HPC accounting questions | `database.query` | PegasusDB (one read-only `SELECT`) |
+| open tickets in allowlisted queues | `tickets.open` | Request Tracker REST 2.0 |
+| open tickets mentioning a host, by subject | `tickets.for_host` | Request Tracker REST 2.0 |
+
+Request Tracker evidence is metadata only -- subject, queue, status, owner,
+and dates. Ticket content and transaction history are never fetched; see
+"How sensitive is the content?" in
+[docs/adding-a-connector.md](docs/adding-a-connector.md).
 
 Only intents whose connector exists are offered to the model. There is no
 SROIAAA endpoint connector yet, so `live.evidence` is planned and
@@ -369,9 +382,19 @@ export ZABBIX_RO_TOKEN=...
 export SROIAAA_WAZUH_ENDPOINT=https://wazuh.example.edu:55000
 export WAZUH_API_USERNAME=...
 export WAZUH_API_PASSWORD=...
+export SROIAAA_RT_ENDPOINT=https://rt.example.edu
+export RT_API_TOKEN=...
+export SROIAAA_RT_QUEUES=Ops,Helpdesk
 ENVEOF
 chmod 600 ~/.config/sroiaaa/env
 ```
+
+`SROIAAA_RT_QUEUES` is a comma-separated allowlist of RT queue names. An
+empty or unset value refuses to construct the RT connector: there is no
+safe default queue set, so a plan that needs RT and finds no queues
+configured fails closed rather than searching every queue in the instance.
+Prefer a dedicated read-only RT API token scoped to those queues, the same
+way `rts_wazuh_api_ro` is scoped for Wazuh.
 
 Note `export`. A variable merely set in `~/.bashrc` is visible to an
 interactive shell but not inherited by child processes, which has cost

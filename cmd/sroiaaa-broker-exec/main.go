@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/maclach/sroiaaa/internal/broker"
@@ -23,6 +24,13 @@ const (
 	pegasusDSNEnv      = "SROIAAA_PEGASUS_DSN"
 	pegasusMaxRowsEnv  = "SROIAAA_PEGASUS_MAX_ROWS"
 	pegasusMaxBytesEnv = "SROIAAA_PEGASUS_MAX_BYTES"
+	rtEndpointEnv      = "SROIAAA_RT_ENDPOINT"
+	rtTokenEnv         = "RT_API_TOKEN"
+	// rtQueuesEnv names the RT queues this deployment allows searching, as a
+	// comma-separated list. Site configuration, so it lives here rather than
+	// in the connector: RT queues are organization-specific and there is no
+	// safe default that includes any of them.
+	rtQueuesEnv = "SROIAAA_RT_QUEUES"
 )
 
 func main() {
@@ -36,6 +44,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	zabbixEndpoint := flags.String("zabbix-endpoint", os.Getenv(zabbixEndpointEnv), "Zabbix JSON-RPC endpoint URL")
 	wazuhEndpoint := flags.String("wazuh-endpoint", os.Getenv(wazuhEndpointEnv), "Wazuh API base URL")
 	wazuhInsecure := flags.Bool("wazuh-insecure", false, "skip TLS verification for the Wazuh API (required where the manager presents a self-signed certificate)")
+	rtEndpoint := flags.String("rt-endpoint", os.Getenv(rtEndpointEnv), "Request Tracker REST 2.0 base URL")
 	timeout := flags.Duration("timeout", 20*time.Second, "overall execution timeout")
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -67,6 +76,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		zabbixEndpoint: *zabbixEndpoint,
 		wazuhEndpoint:  *wazuhEndpoint,
 		wazuhInsecure:  *wazuhInsecure,
+		rtEndpoint:     *rtEndpoint,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "sroiaaa-broker-exec: %v\n", err)
@@ -147,6 +157,7 @@ type connectorOptions struct {
 	zabbixEndpoint string
 	wazuhEndpoint  string
 	wazuhInsecure  bool
+	rtEndpoint     string
 }
 
 // buildConnectors constructs only the connectors this plan actually needs, so
@@ -209,14 +220,46 @@ func buildConnectors(plan broker.RoutePlan, options connectorOptions) ([]connect
 		built = append(built, pegasus)
 	}
 
+	if needed[broker.SourceRequestTracker] {
+		if options.rtEndpoint == "" {
+			return nil, fmt.Errorf("plan needs RT: set -rt-endpoint or %s", rtEndpointEnv)
+		}
+		token := os.Getenv(rtTokenEnv)
+		if token == "" {
+			return nil, fmt.Errorf("plan needs RT: %s is not set (note that a value in ~/.bashrc must also be exported)", rtTokenEnv)
+		}
+		rt, err := connector.NewRTConnector(connector.RTConfig{
+			Endpoint: options.rtEndpoint,
+			Token:    token,
+			Queues:   splitList(os.Getenv(rtQueuesEnv)),
+		})
+		if err != nil {
+			return nil, err
+		}
+		built = append(built, rt)
+	}
+
 	for source := range needed {
 		switch source {
-		case broker.SourceZabbixAPI, broker.SourceWazuhAPI, broker.SourcePegasusDB:
+		case broker.SourceZabbixAPI, broker.SourceWazuhAPI, broker.SourcePegasusDB, broker.SourceRequestTracker:
 		default:
 			return nil, fmt.Errorf("no connector implemented for source %q", source)
 		}
 	}
 	return built, nil
+}
+
+// splitList parses a comma-separated environment value, discarding blanks so
+// a trailing comma or a stray space does not become a queue name that
+// matches nothing.
+func splitList(value string) []string {
+	var out []string
+	for _, part := range strings.Split(value, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 // pegasusMaxRows reads the row cap override, falling back to the connector's
