@@ -137,9 +137,10 @@ ask "how many agents are disconnected right now?"
 
 `ask` is the everyday entry point: it sources your environment, rebuilds the
 binary, and runs one question through the evidence loop. `make install`
-symlinks it somewhere on your PATH — `~/bin` if you have one, otherwise
-`~/.local/bin`, or `make install PREFIX=...` to choose. `make uninstall`
-removes it.
+symlinks it into `~/bin` if you have one, otherwise `~/.local/bin`, or
+`make install PREFIX=...` to choose. It does not edit your shell config: if
+that directory is not already on your PATH it prints a note, and putting it
+there is your job. `make uninstall` removes the symlink.
 
 Entry points live in `bin/`: `ask`, `zabbix-probe.sh`, and `zoom-digest.sh`,
 which is the one cron runs. `scripts/` holds the evaluation harnesses and a
@@ -231,10 +232,30 @@ headroom**, for prompt growth *or* evidence, not both. `make test` fails if
 you exceed it.
 
 Read `SROIAAA-model-evaluation-results.md` in the Obsidian vault before
-running one. It documents three ways these harnesses have already produced
+running one. It documents four ways these harnesses have already produced
 confidently wrong numbers — stale ground truth, collapsed grading dimensions,
-and a baseline that could not express the thing being measured. All three
-were committed by the person who wrote the harness, on the day they wrote it.
+a baseline that could not express the thing being measured, and a grader that
+could not parse the sentence it was grading. Three were committed by the person
+who wrote the harness, on the day they wrote it; the fourth outlived their own
+fixes and was found by someone else.
+
+**Every new rule arrives with a measurement or an admission.** The prompt is
+the one file in this project that grows by accretion, because each rule is
+added on the day some answer was wrong and nothing ever forces a second look.
+So a new rule needs one of two things before it lands: an eval case that
+targets it, or a line in `SROIAAA-prompt-change-log.md` saying it is unmeasured
+and why it is being kept anyway. Both are acceptable. Silence is not, because a
+prompt where proven guardrails and remembered folklore look identical cannot be
+trimmed by anyone who was not there.
+
+The lead rule is the worked example, and it cuts both ways. Over 72 asks,
+`make eval-lead` moved the lead rate from 8/29 to 15/36 — p=0.30, which is not
+a demonstrated effect. The same run moved answers that never found the number
+at all from 7/36 to 0/36, p=0.011, which is significant and is *not what the
+rule was written to do*. The rule stays, recorded as unmeasured-but-retained.
+Do not let the second number be reported as evidence for the first: a
+significant result that belongs to a different claim is the most convincing
+way these harnesses lie.
 
 ## Adding an API
 
