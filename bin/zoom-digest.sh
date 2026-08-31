@@ -2,12 +2,12 @@
 # Post a morning digest into a Zoom Team Chat channel.
 #
 #   . ~/.config/sroiaaa/env
-#   sh scripts/zoom-digest.sh            # ask, and post to Zoom
-#   sh scripts/zoom-digest.sh -n         # ask, print here, post nothing
-#   sh scripts/zoom-digest.sh -n Wazuh   # just that one section
+#   sh bin/zoom-digest.sh            # ask, and post to Zoom
+#   sh bin/zoom-digest.sh -n         # ask, print here, post nothing
+#   sh bin/zoom-digest.sh -n Wazuh   # just that one section
 #
 # From cron, source the environment first; cron gets almost none of it:
-#   0 7 * * 1-5 . $HOME/.config/sroiaaa/env && sh $HOME/sroiaaa-src/scripts/zoom-digest.sh
+#   0 7 * * 1-5 . $HOME/.config/sroiaaa/env && sh $HOME/sroiaaa-src/bin/zoom-digest.sh
 #
 # The signature construction Zoom accepts was confirmed on 2026-08-30 and is
 # the built-in default, so SROIAAA_ZOOM_SIGNATURE_VARIANT need not be set. If

@@ -137,7 +137,15 @@ ask "how many agents are disconnected right now?"
 
 `ask` is the everyday entry point: it sources your environment, rebuilds the
 binary, and runs one question through the evidence loop. `make install`
-symlinks it into `~/bin`.
+symlinks it somewhere on your PATH — `~/bin` if you have one, otherwise
+`~/.local/bin`, or `make install PREFIX=...` to choose. `make uninstall`
+removes it.
+
+Entry points live in `bin/`: `ask`, `zabbix-probe.sh`, and `zoom-digest.sh`,
+which is the one cron runs. `scripts/` holds the evaluation harnesses and a
+shared library that is not meant to be run directly. Nothing requires you to
+put `bin/` itself on your PATH, and you should not: a repository on your PATH
+means any commit becomes an executable you run by typing a common word.
 
 It rebuilds every time, deliberately. A hand-placed binary in `~/bin` was
 found two days and four connector changes behind the source, still answering
@@ -157,7 +165,7 @@ ask -trace "what is broken on dss01?"
 
 ```bash
 make probe          # ask the Zabbix trap questions, judge the answers yourself
-sh scripts/zabbix-probe.sh -l    # list those questions; needs no credentials
+sh bin/zabbix-probe.sh -l    # list those questions; needs no credentials
 ```
 
 `make probe` is not an evaluation. It asks the questions where a *wrong*

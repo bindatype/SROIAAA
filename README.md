@@ -52,6 +52,8 @@ internal/orchestrator/     the model loop: intent in, evidence out
 configs/                   example broker policy
 docs/                      adding-a-connector.md
 scripts/                   harness fitness survey, evidence-loop evaluations
+bin/                       entry points: ask, the probe suite, the digest
+scripts/                   evaluation harnesses and their shared library
 testdata/workspace/        sample files mounted into the container
 testdata/varlog/           sample log files mounted into the container
 ```

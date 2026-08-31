@@ -9,16 +9,19 @@
 # judged rather than admired.
 #
 # Usage:
-#   sh scripts/zabbix-probe.sh              # every case
-#   sh scripts/zabbix-probe.sh trap         # only cases whose id contains "trap"
-#   sh scripts/zabbix-probe.sh -l           # list the cases without asking
+#   bin/zabbix-probe.sh              # every case
+#   bin/zabbix-probe.sh trap         # only cases whose id contains "trap"
+#   bin/zabbix-probe.sh -l           # list the cases without asking
 #
 # Requires the same environment as the digest:
 #   . $HOME/.config/sroiaaa/env
 set -eu
 
-POLICY="${SROIAAA_POLICY:-configs/broker-policy.example.json}"
-CHAT="go run ./cmd/sroiaaa-chat -policy $POLICY -wazuh-insecure"
+# Resolved from this script's own location rather than the working directory,
+# which was a latent version of the bug that stopped `ask` working from
+# anywhere but the repository root.
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+POLICY="${SROIAAA_POLICY:-$ROOT/configs/broker-policy.example.json}"
 
 # id | question | what a good answer does | what a wrong answer looks like
 cases='
@@ -52,6 +55,14 @@ if [ -n "$missing" ]; then
 	echo "zabbix-probe: run  . \$HOME/.config/sroiaaa/env  first" >&2
 	exit 2
 fi
+
+BIN=${SROIAAA_BIN:-"$ROOT/runtime"}
+# Built once rather than `go run` per question: go resolves the module from the
+# working directory, so `go run` failed outright from anywhere but the
+# repository root, and it recompiled for each of the nine cases when it worked.
+mkdir -p "$BIN"
+(cd "$ROOT" && go build -o "$BIN/sroiaaa-chat" ./cmd/sroiaaa-chat)
+CHAT="$BIN/sroiaaa-chat -policy $POLICY -wazuh-insecure"
 
 filter="${1:-}"
 echo "$cases" | while IFS='|' read -r id question good bad; do

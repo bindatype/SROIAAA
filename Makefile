@@ -2,14 +2,14 @@ GO ?= go
 DIST ?= dist
 BINARY ?= sroiaaa-agent
 
-.PHONY: help install test run fmt build-linux-amd64 build-linux-arm64 build-linux-all docker-build docker-up fitness eval-models eval-zabbix eval-pegasus eval-headtohead eval-ablate eval-prompt-ab eval-lead probe
+.PHONY: help install uninstall test run fmt build-linux-amd64 build-linux-arm64 build-linux-all docker-build docker-up fitness eval-models eval-zabbix eval-pegasus eval-headtohead eval-ablate eval-prompt-ab eval-lead probe
 
 # Default target: say what exists. A bare `make` that silently builds one
 # thing tells a newcomer nothing about the other fifteen.
 help:
 	@echo 'Setup and checks:'
 	@echo '  make test              unit tests; no credentials, no network'
-	@echo '  make install           link scripts/ask into ~/bin so you can ask from anywhere'
+	@echo '  make install           put `ask` on your PATH (PREFIX=... to choose where)'
 	@echo '  make fmt               gofmt the tree'
 	@echo ''
 	@echo 'These need:  source ~/.config/sroiaaa/env'
@@ -24,16 +24,31 @@ help:
 	@echo ''
 	@echo 'Reports are written to runtime/*.md and printed to stdout.'
 
-# Puts `ask` on your PATH. It is a symlink rather than a copy, so it cannot go
-# stale the way a hand-placed binary in ~/bin did -- that one was two days and
-# four connector changes behind the source when it was noticed.
+# Puts `ask` on your PATH, at a location the person installing chooses:
+#
+#   make install                     ~/.local/bin, or ~/bin if that is what you have
+#   make install PREFIX=/opt/sroiaaa ~/somewhere else
+#
+# A symlink rather than a copy, so it cannot go stale the way a hand-placed
+# binary in ~/bin did -- that one was two days and four connector changes
+# behind the source when it was noticed, and said nothing about it.
+#
+# Deliberately NOT done by putting bin/ on your PATH. A repository on PATH
+# means any commit, from anyone, becomes an executable you run by typing a
+# common word, which is a poor arrangement for a project about bounded access.
+PREFIX ?= $(if $(wildcard $(HOME)/bin),$(HOME)/bin,$(HOME)/.local/bin)
+
 install:
-	@mkdir -p $(HOME)/bin
-	@ln -sf $(CURDIR)/scripts/ask $(HOME)/bin/ask
-	@echo 'linked $(HOME)/bin/ask -> $(CURDIR)/scripts/ask'
-	@case ":$$PATH:" in *":$(HOME)/bin:"*) ;; \
-	  *) echo 'NOTE: $(HOME)/bin is not on your PATH; add it in ~/.bashrc' ;; esac
+	@mkdir -p $(PREFIX)
+	@ln -sf $(CURDIR)/bin/ask $(PREFIX)/ask
+	@echo 'linked $(PREFIX)/ask -> $(CURDIR)/bin/ask'
+	@case ":$$PATH:" in *":$(PREFIX):"*) ;; \
+	  *) echo 'NOTE: $(PREFIX) is not on your PATH; add it in ~/.bashrc' ;; esac
 	@echo 'try:  ask "how many agents are disconnected right now?"'
+
+uninstall:
+	@rm -f $(PREFIX)/ask
+	@echo 'removed $(PREFIX)/ask
 
 test:
 	$(GO) test ./...
@@ -93,4 +108,4 @@ eval-lead:
 # Not an evaluation: it prints answers and what a right and a wrong one look
 # like, for a person to judge.
 probe:
-	sh ./scripts/zabbix-probe.sh
+	sh ./bin/zabbix-probe.sh
