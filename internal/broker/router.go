@@ -222,6 +222,17 @@ func (r *Router) planLiveEvidence(request RouteRequest) (RoutePlan, error) {
 	if err := validateResourceName(request.Resource); err != nil {
 		return RoutePlan{}, newRouteError("invalid_resource", err.Error())
 	}
+	if request.Since != "" || request.Until != "" {
+		// live.evidence reads a file from the endpoint as it stands now. There
+		// is no history to bound, so a window has nothing to filter and was
+		// silently dropped here for as long as this intent has existed -- the
+		// third state the rest of the router does not have, and the one this
+		// codebase keeps paying for: the caller believes it asked a narrower
+		// question than it asked, and reads a wide answer as a narrow one.
+		return RoutePlan{}, newRouteError("invalid_request",
+			"live.evidence reads the resource as it stands now and takes no since or until; "+
+				"there is no history at the endpoint for a window to filter")
+	}
 
 	allowedResources, ok := r.liveHosts[request.Host]
 	if !ok {

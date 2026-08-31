@@ -75,9 +75,12 @@ func ToolDefinition(intents []string) any {
 		"function": map[string]any{
 			"name": toolName,
 			"description": "Retrieve bounded, read-only infrastructure evidence through the SROIAAA policy broker. " +
-				"Covers Wazuh agent inventory and connection state, and active Zabbix problem triggers. " +
-				"Does NOT cover vulnerabilities or CVEs, installed packages, patch level, log contents, " +
-				"user accounts, configuration, or performance history. Do not call this for questions it cannot answer.",
+				"Covers Wazuh agent inventory and connection state; Zabbix triggers firing now and the Zabbix " +
+				"event log for a past window; a policy-approved file read from an authorized SROIAAA endpoint; " +
+				"and one read-only SQL SELECT against the pegasusdb HPC accounting database. " +
+				"Does NOT cover vulnerabilities or CVEs, installed packages, patch level, user accounts, " +
+				"configuration, performance metrics, or any file outside the policy's resource list. " +
+				"Do not call this for questions it cannot answer.",
 			"parameters": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -101,13 +104,15 @@ func ToolDefinition(intents []string) any {
 					"until": map[string]any{
 						"type": "string",
 						"description": "Close the window since opens. Same forms; a plain date means the end of that day. " +
+							"For monitoring.problems and monitoring.history only. " +
 							"Without it a bound is a ray, and a question about one past day is answered from today.",
 					},
 					"since": map[string]any{
 						"type": "string",
-						"description": "Bound evidence to what changed after this moment. RFC 3339, a date such as 2026-08-28, " +
-							"or a window such as 24h or 7d. Use it for any question about a time period. " +
-							"Not for database.query, which bounds time in its WHERE clause.",
+						"description": "Bound evidence to what CHANGED after this moment. RFC 3339, a date such as 2026-08-28, " +
+							"or a window such as 24h or 7d. For monitoring.problems and monitoring.history only; " +
+							"the other intents report current state and refuse a bound rather than ignore it. " +
+							"A question about what is wrong NOW takes no bound, whatever time it mentions.",
 					},
 					"match": map[string]any{
 						"type": "string",

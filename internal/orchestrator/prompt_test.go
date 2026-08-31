@@ -26,6 +26,23 @@ func TestPromptDescribesEveryIntent(t *testing.T) {
 	}
 }
 
+// The prompt announces how many channels exist before listing them, and the
+// two drifted: it said five while listing six, in a document whose entire job
+// is to be precise about what the model may ask for.
+func TestPromptCountsItsOwnChannels(t *testing.T) {
+	spelled := map[int]string{
+		4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
+	}
+	want, ok := spelled[len(broker.AllIntents())]
+	if !ok {
+		t.Fatalf("no spelling for %d intents; extend this table", len(broker.AllIntents()))
+	}
+	phrase := "these " + want + " evidence channels"
+	if !strings.Contains(systemPrompt, phrase) {
+		t.Errorf("prompt does not say %q, but the broker offers %d intents", phrase, len(broker.AllIntents()))
+	}
+}
+
 func TestPromptDescribesEveryToolParameter(t *testing.T) {
 	// A field absent from the prompt is a field the model infers the name of.
 	// database.query was usable only by accident until "query" was declared.

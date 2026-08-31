@@ -424,3 +424,51 @@ func TestConnectionStateIntentsPlanWithoutBounds(t *testing.T) {
 		}
 	}
 }
+
+// The time-bound contract, in one place. Three documents describe it -- the
+// system prompt, the tool schema, and this router -- and they had drifted:
+// the prompt said every intent but database.query accepted a window, while
+// three of the six refused one and live.evidence silently dropped it. Whether
+// an intent takes since and until is now asserted here, so the next divergence
+// fails a test instead of reaching a model.
+func TestTimeBoundContract(t *testing.T) {
+	router := newTestRouter(t)
+	tests := []struct {
+		name     string
+		request  RouteRequest
+		accepted bool
+	}{
+		{"fleet.inventory refuses", RouteRequest{Intent: IntentFleetInventory}, false},
+		{"agent.status refuses", RouteRequest{Intent: IntentAgentStatus, Host: "node01.example.edu"}, false},
+		{"database.query refuses", RouteRequest{Intent: IntentDatabaseQuery, Query: "SELECT 1 FROM runTBL2 WHERE id = 1"}, false},
+		{"live.evidence refuses", RouteRequest{Intent: IntentLiveEvidence, Host: "node01.example.edu", Resource: "system-messages"}, false},
+		{"monitoring.problems accepts", RouteRequest{Intent: IntentMonitoringProblems}, true},
+		{"monitoring.history accepts", RouteRequest{Intent: IntentMonitoringHistory}, true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for _, bound := range []string{"since", "until"} {
+				request := test.request
+				if bound == "since" {
+					request.Since = "24h"
+				} else {
+					// monitoring.history requires since regardless, so an
+					// until-only case would fail for the wrong reason.
+					request.Since = "24h"
+					request.Until = "1h"
+				}
+				_, err := router.Plan(request)
+				if test.accepted && err != nil {
+					t.Fatalf("%s: expected %s to be accepted, got %v", bound, request.Intent, err)
+				}
+				if !test.accepted {
+					var routeError *RouteError
+					if !errors.As(err, &routeError) || routeError.Code != "invalid_request" {
+						t.Fatalf("%s: expected %s to refuse the bound, got %v", bound, request.Intent, err)
+					}
+				}
+			}
+		})
+	}
+}
