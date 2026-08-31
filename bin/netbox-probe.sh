@@ -201,6 +201,62 @@ try:
         print("   %s" % r.get("name"))
 except Exception as e: print("   (unparseable: %s)" % e)' "$BODY"
 
+hr "graphql"
+# GraphQL and REST disagree about what an ANONYMOUS caller gets. Measured
+# 2026-08-31:
+#
+#   no Authorization header   REST 403        GraphQL 200 {"device_list":[]}
+#   invalid token             REST 403        GraphQL 403
+#
+# So GraphQL does reject a bad credential. What it does not reject is the
+# absence of one: it answers successfully with an empty set, which is
+# indistinguishable from an estate containing nothing. The realistic bug is
+# therefore a connector that never attaches the header at all -- an unset
+# environment variable, which this project has already been bitten by once --
+# and it would look like a clean answer rather than a failure.
+#
+# A token must therefore be checked POSITIVELY, by requiring a row back.
+gql() {
+	curl -s $TLS --max-time 30 -o "$BODY" -w '%{http_code}' \
+		-H "Content-Type: application/json" ${1:+-H "Authorization: Token $TOKEN"} \
+		--data '{"query":"{ device_list(pagination:{limit:1}) { name } }"}' \
+		"$ENDPOINT/graphql/" 2>/dev/null || true
+}
+
+rows() { python3 -c 'import json,sys
+try:
+	d=json.load(open(sys.argv[1]))
+	if d.get("errors"): print("errors")
+	else: print(len((d.get("data") or {}).get("device_list") or []))
+except Exception: print("nonjson")' "$BODY"; }
+
+acode=$(gql "")
+arows=$(rows)
+printf 'anonymous   http=%s rows=%s\n' "$acode" "$arows"
+if [ "$acode" = "200" ] && [ "$arows" = "0" ]; then
+	echo '  note: anonymous GraphQL answers 200 with an empty set, not 403.'
+	echo '  An empty result here is NOT evidence that the estate is empty.'
+fi
+
+tcode=$(gql yes)
+trows=$(rows)
+printf 'with token  http=%s rows=%s\n' "$tcode" "$trows"
+case "$tcode/$trows" in
+403/*)
+	echo '  the token was REJECTED for GraphQL (403). It may still work over'
+	echo '  REST -- compare the counts above -- or it may be invalid entirely.' ;;
+200/0)
+	echo '  *** ambiguous: authenticated, but zero devices returned. That is the'
+	echo '  *** same answer an unauthenticated caller gets. Compare the REST'
+	echo '  *** device count above before concluding the estate is empty.' ;;
+200/errors)
+	echo '  the endpoint reported a query error; the schema may differ by version' ;;
+200/*)
+	echo '  positive result: the token returns data over GraphQL' ;;
+*)
+	echo "  unexpected: http=$tcode rows=$trows" ;;
+esac
+
 hr "pagination ceiling"
 # NetBox caps page size server-side (MAX_PAGE_SIZE, 1000 by default). A caller
 # that asks for more gets the cap silently, which is exactly how a page becomes
