@@ -2,7 +2,7 @@ GO ?= go
 DIST ?= dist
 BINARY ?= sroiaaa-agent
 
-.PHONY: help install uninstall test run fmt build-linux-amd64 build-linux-arm64 build-linux-all docker-build docker-up fitness eval-models eval-zabbix eval-pegasus eval-headtohead eval-ablate eval-prompt-ab eval-lead probe
+.PHONY: help install uninstall test check-entrypoints run fmt build-linux-amd64 build-linux-arm64 build-linux-all docker-build docker-up fitness eval-models eval-zabbix eval-pegasus eval-headtohead eval-ablate eval-prompt-ab eval-lead probe
 
 # Default target: say what exists. A bare `make` that silently builds one
 # thing tells a newcomer nothing about the other fifteen.
@@ -10,6 +10,7 @@ help:
 	@echo 'Setup and checks:'
 	@echo '  make test              unit tests; no credentials, no network'
 	@echo '  make install           put `ask` on your PATH (PREFIX=... to choose where)'
+	@echo '  make check-entrypoints check install, uninstall, and ask startup'
 	@echo '  make fmt               gofmt the tree'
 	@echo ''
 	@echo 'These need:  source ~/.config/sroiaaa/env'
@@ -48,10 +49,15 @@ install:
 
 uninstall:
 	@rm -f $(PREFIX)/ask
-	@echo 'removed $(PREFIX)/ask
+	@echo 'removed $(PREFIX)/ask'
 
 test:
 	$(GO) test ./...
+
+# The path a new contributor walks before any Go test is relevant: make
+# install, then typing `ask`. Needs no credentials and no network.
+check-entrypoints:
+	@sh ./scripts/check_entrypoints.sh
 
 run:
 	$(GO) run ./cmd/sroiaaa-agent
