@@ -1,0 +1,61 @@
+#!/bin/bash
+# Ask SROIAAA a question.
+#
+#   ask "how many agents are disconnected right now?"
+#   ask -model llama3.3:latest "what is broken on dss01?"
+#
+# This existed for a while as a hand-written file in one person's ~/bin and
+# nowhere else, so the second contributor to join the project did not have it
+# and had no way to discover it. It belongs in the repository.
+#
+# It rebuilds before every run. That costs a fraction of a second once Go's
+# cache is warm and removes a whole class of confusion: the ~/bin copy it
+# replaces was a binary compiled on 28 August and still being used on the 30th,
+# two days and four connector changes later, silently answering with behaviour
+# that no longer existed in the source tree.
+set -euo pipefail
+
+# Resolve through the symlink so this works when linked into ~/bin.
+target=${BASH_SOURCE[0]}
+while [ -L "$target" ]; do
+	link=$(readlink "$target")
+	case $link in
+	/*) target=$link ;;
+	*) target=$(dirname "$target")/$link ;;
+	esac
+done
+ROOT=$(cd "$(dirname "$target")/.." && pwd)
+
+ENV_FILE=${SROIAAA_ENV:-$HOME/.config/sroiaaa/env}
+if [ -r "$ENV_FILE" ]; then
+	# shellcheck disable=SC1090
+	. "$ENV_FILE"
+else
+	echo "ask: no environment file at $ENV_FILE" >&2
+	echo "ask: see docs/onboarding.md, section 2" >&2
+	exit 2
+fi
+
+missing=""
+for name in SROIAAA_MINDROUTER_ENDPOINT MINDROUTER_API_KEY; do
+	eval "value=\${$name:-}"
+	[ -n "$value" ] || missing="$missing $name"
+done
+if [ -n "$missing" ]; then
+	echo "ask: missing from the environment:$missing" >&2
+	echo "ask: every line in $ENV_FILE needs 'export'; a variable that is only set" >&2
+	echo "ask: is not inherited by the program you are running" >&2
+	exit 2
+fi
+
+# A personal policy overrides the repository's, but the repository's is a real
+# default rather than a placeholder -- the two were byte-identical on the one
+# host where a personal copy existed, so requiring one was ceremony.
+POLICY=${SROIAAA_POLICY:-$HOME/.config/sroiaaa/policy.json}
+[ -r "$POLICY" ] || POLICY=$ROOT/configs/broker-policy.example.json
+
+BIN=${SROIAAA_BIN:-$ROOT/runtime}
+mkdir -p "$BIN"
+go build -o "$BIN/sroiaaa-chat" "$ROOT/cmd/sroiaaa-chat"
+
+exec "$BIN/sroiaaa-chat" -policy "$POLICY" -wazuh-insecure "$@"

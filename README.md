@@ -65,7 +65,12 @@ export SROIAAA_AUTH_TOKEN="${SROIAAA_AUTH_TOKEN:-dev-sroiaaa-token}"
 ```
 
 Every command below runs from the repository root. `make help` lists the
-targets.
+targets, and `make install` puts `ask` on your PATH:
+
+```bash
+make install
+ask "how many agents are disconnected right now?"
+```
 
 Joining the project rather than just running it? Start with
 [docs/onboarding.md](docs/onboarding.md).

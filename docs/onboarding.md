@@ -128,7 +128,30 @@ repo, or read the last line the script prints, which gives the full path.
 
 If it does not pass, see [Troubleshooting](#troubleshooting) below.
 
-### 4. What else you can run
+### 4. Put `ask` on your PATH
+
+```bash
+make install
+ask "how many agents are disconnected right now?"
+```
+
+`ask` is the everyday entry point: it sources your environment, rebuilds the
+binary, and runs one question through the evidence loop. `make install`
+symlinks it into `~/bin`.
+
+It rebuilds every time, deliberately. A hand-placed binary in `~/bin` was
+found two days and four connector changes behind the source, still answering
+with behaviour that no longer existed — and nothing about the output said so.
+A symlink to a script that rebuilds cannot drift.
+
+Add `-model <name>` to try another model, or `-trace` to see the intent the
+model proposed and what policy did with it:
+
+```bash
+ask -trace "what is broken on dss01?"
+```
+
+### 5. What else you can run
 
 `make help` lists everything. The two worth knowing on day one:
 
@@ -151,6 +174,7 @@ run.
 | Zabbix or Wazuh "connector error" | Usually a missing credential rather than a broken service. Check the variable exists: `printenv ZABBIX_RO_TOKEN \| wc -c`. |
 | `make: *** No rule to make target` | You are not in the repository root. |
 | An answer that is confidently wrong | Expected, and the point of the probe suite. Record it. Most rules in the prompt exist because of one of these. |
+| Answers ignore a feature you just added | You are running a stale binary. `ask` and the digest rebuild every run; a copy in `~/bin` does not. Use `make install`, not `cp`. |
 | Everything passes but the answer looks thin | Check `runtime/*.md` for the graded detail; the terminal summary is a summary. |
 
 A question answered from missing credentials tends to fail in the

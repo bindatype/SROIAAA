@@ -2,13 +2,14 @@ GO ?= go
 DIST ?= dist
 BINARY ?= sroiaaa-agent
 
-.PHONY: help test run fmt build-linux-amd64 build-linux-arm64 build-linux-all docker-build docker-up fitness eval-models eval-zabbix eval-pegasus eval-headtohead eval-ablate eval-prompt-ab eval-lead probe
+.PHONY: help install test run fmt build-linux-amd64 build-linux-arm64 build-linux-all docker-build docker-up fitness eval-models eval-zabbix eval-pegasus eval-headtohead eval-ablate eval-prompt-ab eval-lead probe
 
 # Default target: say what exists. A bare `make` that silently builds one
 # thing tells a newcomer nothing about the other fifteen.
 help:
 	@echo 'Setup and checks:'
 	@echo '  make test              unit tests; no credentials, no network'
+	@echo '  make install           link scripts/ask into ~/bin so you can ask from anywhere'
 	@echo '  make fmt               gofmt the tree'
 	@echo ''
 	@echo 'These need:  source ~/.config/sroiaaa/env'
@@ -22,6 +23,17 @@ help:
 	@echo '  make eval-models       intent routing across several models'
 	@echo ''
 	@echo 'Reports are written to runtime/*.md and printed to stdout.'
+
+# Puts `ask` on your PATH. It is a symlink rather than a copy, so it cannot go
+# stale the way a hand-placed binary in ~/bin did -- that one was two days and
+# four connector changes behind the source when it was noticed.
+install:
+	@mkdir -p $(HOME)/bin
+	@ln -sf $(CURDIR)/scripts/ask $(HOME)/bin/ask
+	@echo 'linked $(HOME)/bin/ask -> $(CURDIR)/scripts/ask'
+	@case ":$$PATH:" in *":$(HOME)/bin:"*) ;; \
+	  *) echo 'NOTE: $(HOME)/bin is not on your PATH; add it in ~/.bashrc' ;; esac
+	@echo 'try:  ask "how many agents are disconnected right now?"'
 
 test:
 	$(GO) test ./...
