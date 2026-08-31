@@ -1,11 +1,15 @@
 runtime/
-bin/
 dist/
 .gocache/
 .gomodcache/
 *.log
 !testdata/varlog/system.log
 *.out
+
+# Python bytecode from the evaluation harnesses. Two .pyc files were tracked
+# and rewritten on every run, putting binary churn in the diff of any change
+# that touched a harness.
+__pycache__/
 
 # Binaries a bare `go build ./cmd/...` drops in the repo root. The scripts here
 # build into runtime/, but an ad-hoc build does not, and `git add -A` will
