@@ -68,8 +68,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
-	if *policyPath == "" || *model == "" {
+	// Two separate failures, because a message naming the wrong flag sends the
+	// operator to fix something that was never wrong.
+	if *policyPath == "" {
 		fmt.Fprintln(stderr, "sroiaaa-chat: -policy is required")
+		return 2
+	}
+	if *model == "" {
+		fmt.Fprintln(stderr, "sroiaaa-chat: -model must name a model or alias")
 		return 2
 	}
 
