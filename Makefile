@@ -2,7 +2,7 @@ GO ?= go
 DIST ?= dist
 BINARY ?= sroiaaa-agent
 
-.PHONY: help install uninstall test check-entrypoints run fmt build-linux-amd64 build-linux-arm64 build-linux-all docker-build docker-up fitness eval-models eval-zabbix eval-pegasus eval-headtohead eval-ablate eval-prompt-ab eval-lead probe
+.PHONY: help install uninstall test check-entrypoints run fmt build-linux-amd64 build-linux-arm64 build-linux-all docker-build docker-up fitness eval-models eval-zabbix eval-pegasus eval-headtohead eval-ablate eval-prompt-ab eval-lead probe netbox-probe
 
 # Default target: say what exists. A bare `make` that silently builds one
 # thing tells a newcomer nothing about the other fifteen.
@@ -15,6 +15,7 @@ help:
 	@echo ''
 	@echo 'These need:  source ~/.config/sroiaaa/env'
 	@echo '  make probe             ask the Zabbix trap questions and judge them by eye'
+	@echo '  make netbox-probe      reconnaissance against the NetBox API (no connector yet)'
 	@echo '  make eval-zabbix       grade the Zabbix path end to end'
 	@echo '  make eval-pegasus      grade model-authored SQL'
 	@echo '  make eval-headtohead   compare two models over six question shapes'
@@ -115,3 +116,10 @@ eval-lead:
 # like, for a person to judge.
 probe:
 	sh ./bin/zabbix-probe.sh
+
+# NetBox has no connector yet, so this talks to the API directly rather than
+# asking SROIAAA anything. Learning what a source actually returns is the step
+# that comes before teaching the broker to ask it; every trap in the Zabbix
+# guide was found this way and none were in the vendor documentation.
+netbox-probe:
+	sh ./bin/netbox-probe.sh
