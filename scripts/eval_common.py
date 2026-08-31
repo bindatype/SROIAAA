@@ -78,6 +78,22 @@ def numbers_in(text):
     return [int(n) for n in re.findall(r"\b(\d{1,7})\b", text)]
 
 
+def first_sentence(answer):
+    """The opening sentence, in the terms a skimming reader sees it.
+
+    Split on a period followed by whitespace, so that "5:00 a.m.", "dss01." and
+    a decimal do not truncate the sentence early and make a good lead look bare.
+    A naive answer.split(".")[0] graded "No new agent failures since 5:00 a.m."
+    as a lead that omitted the outage, because everything after "a" was cut --
+    a harness misreading the exact behaviour it was built to measure.
+    """
+    text = normalize(answer).replace("\n", " ")
+    for i in range(len(text) - 1):
+        if text[i] == "." and text[i + 1] == " ":
+            return text[:i]
+    return text
+
+
 def states_a_number(text, expected, tolerance=0.01):
     """Whether the answer states a value close to expected.
 

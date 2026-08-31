@@ -39,7 +39,7 @@ the thing being measured:
 import datetime, json, os, ssl, subprocess, sys, time, urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from eval_common import build_chat, normalize, require_env, write_report
+from eval_common import build_chat, first_sentence, normalize, require_env, write_report
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROMPT = os.path.join(ROOT, "internal", "orchestrator", "prompt.md")
@@ -91,19 +91,6 @@ def numbers_in(text):
         if digits:
             out.append(int(digits))
     return out
-
-
-def first_sentence(answer):
-    """The opening sentence, in the terms a skimming reader sees it.
-
-    Split on a period followed by whitespace so that "5:00 a.m." and a decimal
-    do not truncate the sentence early and make a good lead look bare.
-    """
-    text = normalize(answer).replace("\n", " ")
-    for i in range(len(text) - 1):
-        if text[i] == "." and text[i + 1] == " ":
-            return text[:i]
-    return text
 
 
 def classify(answer, wanted):

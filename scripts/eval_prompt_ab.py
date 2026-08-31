@@ -29,7 +29,7 @@ and 1850 across a single afternoon.
 import datetime, json, os, ssl, subprocess, sys, time, urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from eval_common import build_chat, normalize, require_env, write_report
+from eval_common import build_chat, first_sentence, normalize, require_env, write_report
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROMPT = os.path.join(ROOT, "internal", "orchestrator", "prompt.md")
@@ -204,7 +204,7 @@ def grade(case, answer, low, high, expect_text):
     # Only a first sentence that is reassuring AND silent about the outage
     # fails.
     if case.get("lead") and low is not None:
-        first = text.split(".")[0]
+        first = first_sentence(answer)
         reassuring = any(p in first for p in ("no host", "no hosts", "none"))
         carries = any(low <= n <= high for n in numbers_in(first))
         if reassuring and not carries:
