@@ -23,7 +23,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from eval_common import (ask, build_chat, normalize, require_env,
                          states_a_number, write_report)
 
-DEFAULT_MODEL = "qwen3.6:35b"
+# The project default, chosen on 2026-08-28 by eval_headtohead and recorded in
+# docs/onboarding.md. These scripts used to default to qwen3.6:35b, so the
+# step the onboarding doc gives a newcomer to verify their setup exercised a
+# model that was not the one they would actually be using.
+DEFAULT_MODEL = os.environ.get("EVAL_MODEL", "gemma4:31b")
 
 
 def truth(sql):

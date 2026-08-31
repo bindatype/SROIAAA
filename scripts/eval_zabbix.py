@@ -15,7 +15,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from eval_common import (ask, build_chat, normalize, numbers_in, require_env,
                          write_report, zabbix_count)
 
-DEFAULT_MODEL = "qwen3.6:35b"
+# The project default, chosen on 2026-08-28 by eval_headtohead and recorded in
+# docs/onboarding.md. These scripts used to default to qwen3.6:35b, so the
+# step the onboarding doc gives a newcomer to verify their setup exercised a
+# model that was not the one they would actually be using.
+DEFAULT_MODEL = os.environ.get("EVAL_MODEL", "gemma4:31b")
 # A host known to carry several correlated problems. Change if it is remediated.
 SUBJECT_HOST = os.environ.get("EVAL_HOST", "dss01")
 

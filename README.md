@@ -58,19 +58,21 @@ testdata/varlog/           sample log files mounted into the container
 
 ## Quick start
 
-After cloning, define the repository root once:
-
 ```bash
 git clone https://github.com/bindatype/SROIAAA.git
 cd SROIAAA
-SRO_ROOT="${SRO_ROOT:-$PWD}"
 export SROIAAA_AUTH_TOKEN="${SROIAAA_AUTH_TOKEN:-dev-sroiaaa-token}"
 ```
+
+Every command below runs from the repository root. `make help` lists the
+targets.
+
+Joining the project rather than just running it? Start with
+[docs/onboarding.md](docs/onboarding.md).
 
 ### Local
 
 ```bash
-cd "$SRO_ROOT"
 go test ./...
 go run ./cmd/sroiaaa-agent
 ```
@@ -99,7 +101,6 @@ The agent is a pure-Go Linux binary, so the repository supports both
 `linux/amd64` and `linux/arm64` builds.
 
 ```bash
-cd "$SRO_ROOT"
 make build-linux-all
 ```
 
@@ -111,7 +112,6 @@ This writes:
 ### Docker harness
 
 ```bash
-cd "$SRO_ROOT"
 docker compose up --build
 ```
 
@@ -138,7 +138,6 @@ To survey whether the harness contains the read-only operator tools we
 actually want to rely on, run:
 
 ```bash
-cd "$SRO_ROOT"
 make fitness
 ```
 

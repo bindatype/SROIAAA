@@ -2,7 +2,26 @@ GO ?= go
 DIST ?= dist
 BINARY ?= sroiaaa-agent
 
-.PHONY: test run fmt build-linux-amd64 build-linux-arm64 build-linux-all docker-build docker-up fitness eval-models eval-zabbix eval-pegasus eval-headtohead eval-ablate
+.PHONY: help test run fmt build-linux-amd64 build-linux-arm64 build-linux-all docker-build docker-up fitness eval-models eval-zabbix eval-pegasus eval-headtohead eval-ablate eval-prompt-ab eval-lead probe
+
+# Default target: say what exists. A bare `make` that silently builds one
+# thing tells a newcomer nothing about the other fifteen.
+help:
+	@echo 'Setup and checks:'
+	@echo '  make test              unit tests; no credentials, no network'
+	@echo '  make fmt               gofmt the tree'
+	@echo ''
+	@echo 'These need:  source ~/.config/sroiaaa/env'
+	@echo '  make probe             ask the Zabbix trap questions and judge them by eye'
+	@echo '  make eval-zabbix       grade the Zabbix path end to end'
+	@echo '  make eval-pegasus      grade model-authored SQL'
+	@echo '  make eval-headtohead   compare two models over six question shapes'
+	@echo '  make eval-prompt-ab    compare two prompts on the same binary'
+	@echo '  make eval-lead         measure the lead-with-the-failure rule alone'
+	@echo '  make eval-ablate       which prompt rules this model needs'
+	@echo '  make eval-models       intent routing across several models'
+	@echo ''
+	@echo 'Reports are written to runtime/*.md and printed to stdout.'
 
 test:
 	$(GO) test ./...
@@ -34,6 +53,10 @@ fitness:
 
 # Evaluations need live credentials exported into the environment, which the
 # runtime env file provides:  source ~/.config/sroiaaa/env
+#
+# Each one prints to stdout AND writes runtime/<name>.md. If you go looking for
+# the results afterwards, that is where they are -- with a .md suffix, which is
+# why `find . -name eval-zabbix` finds nothing.
 eval-models:
 	python3 ./scripts/eval_models.py
 
@@ -48,3 +71,14 @@ eval-headtohead:
 
 eval-ablate:
 	python3 ./scripts/eval_ablate.py
+
+eval-prompt-ab:
+	python3 ./scripts/eval_prompt_ab.py
+
+eval-lead:
+	python3 ./scripts/eval_lead.py
+
+# Not an evaluation: it prints answers and what a right and a wrong one look
+# like, for a person to judge.
+probe:
+	sh ./scripts/zabbix-probe.sh

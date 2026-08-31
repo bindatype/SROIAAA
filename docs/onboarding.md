@@ -61,22 +61,43 @@ Runtime configuration lives in a file you source explicitly. Never in
 mkdir -p ~/.config/sroiaaa && chmod 700 ~/.config/sroiaaa
 umask 077
 cat > ~/.config/sroiaaa/env <<'ENVEOF'
+# The model gateway. Needed by everything that asks a question.
 export MINDROUTER_API_KEY=...
 export SROIAAA_MINDROUTER_ENDPOINT=http://localhost:8000
+
+# Zabbix: monitoring problems and the event log.
 export SROIAAA_ZABBIX_ENDPOINT=https://zabbix.example.edu/api_jsonrpc.php
 export ZABBIX_RO_TOKEN=...
+
+# Wazuh: agent inventory and connection state.
 export SROIAAA_WAZUH_ENDPOINT=https://wazuh.example.edu:55000
 export WAZUH_API_USERNAME=...
 export WAZUH_API_PASSWORD=...
+# Agents in these groups are escalated when they go down. Without it the
+# check does not run, and the evidence says so rather than reporting zero.
+export SROIAAA_WAZUH_CRITICAL_GROUPS=RTS_Ops,Viper
+
+# Scheduler accounting. Needed by eval-pegasus and the morning digest.
+export SROIAAA_PEGASUS_DSN='readonly:PASSWORD@tcp(db.example.edu:3306)/pegasusdb?timeout=10s&readTimeout=30s&parseTime=false'
+
+# Where each answered question is recorded. Yours, not shared.
+export SROIAAA_BROKER_AUDIT=$HOME/.local/share/sroiaaa/broker-audit.jsonl
 ENVEOF
 chmod 600 ~/.config/sroiaaa/env
+mkdir -p ~/.local/share/sroiaaa
 ```
+
+Ask for the real values rather than copying them out of someone's shell
+history or another user's file. The Zoom variables are deliberately absent:
+only the host that runs the 04:45 digest needs those, and a second copy of a
+webhook secret is a second thing to rotate.
 
 Every line needs `export`. A variable that is only *set* is visible to your
 interactive shell but is not inherited by the programs you run. This has
 cost time on three separate occasions in this project, including once
 where the failure looked like a broken credential rather than a missing
-one.
+one, and once where a scheduled job failed silently at 04:45 because the
+values lived in `~/.bashrc`, which `cron` does not read.
 
 ### 3. Verify end to end
 
@@ -85,9 +106,57 @@ source ~/.config/sroiaaa/env
 make eval-zabbix
 ```
 
-This runs real questions against live monitoring data and grades the
-answers. If it passes, your environment is correct and you have a working
-baseline to compare against after you change something.
+This asks six real questions against live monitoring data and grades the
+answers. It takes about a minute. Success looks like:
+
+```
+model: gemma4:31b   subject host: dss01
+  total_problems      6.2s  PASS
+  host_scoped         1.4s  PASS
+  ...
+===== gemma4:31b: 6/6 passed, avg 3.1s =====
+
+report written to /home/you/SROIAAA/runtime/eval-zabbix.md
+```
+
+**Where the output goes.** Every evaluation prints to your terminal *and*
+writes `runtime/<name>.md` inside the repository. The suffix is `.md`, which
+is why `find . -name eval-zabbix` finds nothing — look for `runtime/` in the
+repo, or read the last line the script prints, which gives the full path.
+
+`runtime/` is git-ignored. Nothing you run here commits anything.
+
+If it does not pass, see [Troubleshooting](#troubleshooting) below.
+
+### 4. What else you can run
+
+`make help` lists everything. The two worth knowing on day one:
+
+```bash
+make probe          # ask the Zabbix trap questions, judge the answers yourself
+sh scripts/zabbix-probe.sh -l    # list those questions; needs no credentials
+```
+
+`make probe` is not an evaluation. It asks the questions where a *wrong*
+answer reads as good news, and prints what a right and a wrong answer look
+like for each, for you to judge. It is the fastest way to build a sense of
+what this system does badly. It found a live false all-clear on its first
+run.
+
+## Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| `missing environment: ...` | The env file is not sourced in *this* shell, or a line lacks `export`. Sourcing does not survive a new terminal. |
+| Zabbix or Wazuh "connector error" | Usually a missing credential rather than a broken service. Check the variable exists: `printenv ZABBIX_RO_TOKEN \| wc -c`. |
+| `make: *** No rule to make target` | You are not in the repository root. |
+| An answer that is confidently wrong | Expected, and the point of the probe suite. Record it. Most rules in the prompt exist because of one of these. |
+| Everything passes but the answer looks thin | Check `runtime/*.md` for the graded detail; the terminal summary is a summary. |
+
+A question answered from missing credentials tends to fail in the
+reassuring direction — "no problems found" rather than "I could not ask".
+If an answer seems too calm for the state of the estate, check your
+environment before you believe it.
 
 ## Which model to use
 
@@ -112,6 +181,28 @@ Earlier single-question comparisons could not separate those two, and one of
 them picked a different winner. If you are evaluating a model, use the suite
 rather than a question you like: a model can be perfect on an aggregate and
 still answer a different question than the one asked.
+
+### Changing the prompt rather than the model
+
+Two more harnesses exist for that, and they are worth knowing about before
+you edit `internal/orchestrator/prompt.md`:
+
+```bash
+make eval-prompt-ab   # two prompts, same binary, on the questions that matter
+make eval-lead        # one rule in isolation
+```
+
+The prompt has a hard budget. Every model on this gateway is capped at 32k
+tokens whatever its native context, and the prompt travels alongside up to
+64 KB of evidence on the same turn. There is currently about **8 KB of
+headroom**, for prompt growth *or* evidence, not both. `make test` fails if
+you exceed it.
+
+Read `SROIAAA-model-evaluation-results.md` in the Obsidian vault before
+running one. It documents three ways these harnesses have already produced
+confidently wrong numbers — stale ground truth, collapsed grading dimensions,
+and a baseline that could not express the thing being measured. All three
+were committed by the person who wrote the harness, on the day they wrote it.
 
 ## Adding an API
 
