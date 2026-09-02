@@ -134,7 +134,22 @@ func (c *RTConnector) Execute(ctx context.Context, step broker.RouteStep) (Evide
 		limit = 100
 	}
 
-	query := ticketSearchQuery(step.Host, c.queues)
+	// Created never moves retroactively, unlike a Wazuh agent's last-contact
+	// time or a Zabbix trigger's last-changed time: bounding by it narrows
+	// which open tickets are in view without ever hiding one that is still
+	// open. RT computes the exact count for the bounded query itself, so
+	// "how many tickets older than 60 days" never has to be answered by
+	// counting dates off a truncated page.
+	since, err := rtDateBound(step.Since)
+	if err != nil {
+		return Evidence{}, err
+	}
+	until, err := rtDateBound(step.Until)
+	if err != nil {
+		return Evidence{}, err
+	}
+
+	query := ticketSearchQuery(step.Host, since, until, c.queues)
 	requestedAt := time.Now().UTC()
 	items, total, err := c.search(ctx, query, limit)
 	if err != nil {
@@ -151,6 +166,8 @@ func (c *RTConnector) Execute(ctx context.Context, step broker.RouteStep) (Evide
 		Action:         step.Action,
 		Endpoint:       redactEndpoint(c.endpoint),
 		Query:          query,
+		Since:          step.Since,
+		Until:          step.Until,
 		RequestedAt:    requestedAt,
 		DurationMS:     time.Since(requestedAt).Milliseconds(),
 		ItemCount:      len(items),
@@ -165,7 +182,7 @@ func (c *RTConnector) Execute(ctx context.Context, step broker.RouteStep) (Evide
 			"tickets_by_queue was not computed: %d queues are configured, more than the %d this connector "+
 				"will fan a single search out across", len(c.queues), maxRTQueueCensus))
 	} else {
-		breakdown, err := c.queueCensus(ctx, step.Host)
+		breakdown, err := c.queueCensus(ctx, step.Host, since, until)
 		if err != nil {
 			return Evidence{}, err
 		}
@@ -173,6 +190,20 @@ func (c *RTConnector) Execute(ctx context.Context, step broker.RouteStep) (Evide
 	}
 
 	return evidence, nil
+}
+
+// rtDateBound converts a broker-normalized RFC 3339 time bound into the
+// literal RT's TicketSQL date comparison expects. Empty stays empty: an
+// unset bound must not become a comparison against the zero time.
+func rtDateBound(value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	moment, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return "", newConnectorError("invalid_time_bound", err.Error())
+	}
+	return moment.UTC().Format("2006-01-02 15:04:05"), nil
 }
 
 // search runs one bounded ticket search and returns normalized items plus the
@@ -210,11 +241,11 @@ func (c *RTConnector) search(ctx context.Context, query string, limit int) ([]Ev
 // say where the open work actually is rather than only how much of it there
 // is. It costs one extra round trip per queue, bounded by maxRTQueueCensus,
 // the same trade the Zabbix connector makes for its own per-host breakdown.
-func (c *RTConnector) queueCensus(ctx context.Context, host string) (map[string]int, error) {
+func (c *RTConnector) queueCensus(ctx context.Context, host, since, until string) (map[string]int, error) {
 	counts := make(map[string]int, len(c.queues))
 	for _, queue := range c.queues {
 		values := url.Values{}
-		values.Set("query", ticketSearchQuery(host, []string{queue}))
+		values.Set("query", ticketSearchQuery(host, since, until, []string{queue}))
 		values.Set("per_page", "1")
 
 		body, status, err := c.get(ctx, "/REST/2.0/tickets", values)
@@ -289,7 +320,10 @@ func rtStatusError(status int, body []byte) error {
 // values that already passed policy, the same separation the Zabbix and
 // Wazuh connectors keep between an authorized request and the query that
 // implements it.
-func ticketSearchQuery(host string, queues []string) string {
+// since and until are RT-formatted date literals (see rtDateBound), already
+// bounded and normalized by the broker before this function ever sees them --
+// never raw request text.
+func ticketSearchQuery(host, since, until string, queues []string) string {
 	// New, open, and stalled are RT's active statuses. Resolved, rejected, and
 	// deleted tickets are excluded: "what is open" means work nobody has
 	// closed out, not a full history of the queue.
@@ -307,6 +341,12 @@ func ticketSearchQuery(host string, queues []string) string {
 		// different sensitivity decision than filtering by subject line and one
 		// this connector does not make silently.
 		parts = append(parts, fmt.Sprintf("Subject LIKE '%s'", rtEscape(host)))
+	}
+	if since != "" {
+		parts = append(parts, fmt.Sprintf("Created > '%s'", since))
+	}
+	if until != "" {
+		parts = append(parts, fmt.Sprintf("Created < '%s'", until))
 	}
 	return strings.Join(parts, " AND ")
 }

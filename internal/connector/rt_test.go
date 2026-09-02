@@ -257,9 +257,68 @@ func TestRTConnectorSkipsQueueCensusWhenAllowlistIsLarge(t *testing.T) {
 }
 
 func TestTicketSearchQueryEscapesQuotes(t *testing.T) {
-	query := ticketSearchQuery("o'brien", []string{"Ops"})
+	query := ticketSearchQuery("o'brien", "", "", []string{"Ops"})
 	if !strings.Contains(query, `Subject LIKE 'o\'brien'`) {
 		t.Errorf("query = %q, want an escaped quote", query)
+	}
+}
+
+func TestTicketSearchQueryAddsCreatedBounds(t *testing.T) {
+	query := ticketSearchQuery("", "2026-01-01 00:00:00", "2026-07-04 00:00:00", []string{"Ops"})
+	if !strings.Contains(query, "Created > '2026-01-01 00:00:00'") {
+		t.Errorf("query = %q, want a Created lower bound", query)
+	}
+	if !strings.Contains(query, "Created < '2026-07-04 00:00:00'") {
+		t.Errorf("query = %q, want a Created upper bound", query)
+	}
+}
+
+func TestRTConnectorFiltersByCreatedDate(t *testing.T) {
+	var capturedQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("per_page") == "1" {
+			w.Write([]byte(`{"total":35,"items":[]}`))
+			return
+		}
+		capturedQuery = r.URL.Query().Get("query")
+		w.Write([]byte(`{"total":35,"items":[
+			{"id":"1","Subject":"old ticket","Status":"open","Queue":"Ops","Created":"2026-01-15T00:00:00Z"}
+		]}`))
+	}))
+	defer server.Close()
+
+	connector := newTestRT(t, server.URL, []string{"Ops"})
+	evidence, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceRequestTracker,
+		Action: "tickets.search",
+		Until:  "2026-07-04T00:00:00Z",
+		Limit:  50,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(capturedQuery, "Created < '2026-07-04 00:00:00'") {
+		t.Errorf("query = %q, want the until bound translated into a Created upper bound", capturedQuery)
+	}
+	// RT's own total for the bounded query, not a count derived from a page.
+	if evidence.TotalAvailable != 35 {
+		t.Errorf("TotalAvailable = %d, want RT's exact total for the bounded query", evidence.TotalAvailable)
+	}
+	if evidence.Until != "2026-07-04T00:00:00Z" {
+		t.Errorf("evidence.Until = %q, want the applied bound echoed back", evidence.Until)
+	}
+}
+
+func TestRTConnectorRejectsMalformedTimeBound(t *testing.T) {
+	connector := newTestRT(t, "https://rt.example.edu", []string{"Ops"})
+	_, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceRequestTracker,
+		Action: "tickets.search",
+		Until:  "not-a-time",
+	})
+	var connErr *ConnectorError
+	if err == nil || !asConnectorError(err, &connErr) || connErr.Code != "invalid_time_bound" {
+		t.Fatalf("error = %v, want invalid_time_bound", err)
 	}
 }
 

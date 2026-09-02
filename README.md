@@ -344,6 +344,14 @@ These intents, and nothing else:
 | open tickets in allowlisted queues | `tickets.open` | Request Tracker REST 2.0 |
 | open tickets mentioning a host, by subject | `tickets.for_host` | Request Tracker REST 2.0 |
 
+`tickets.open` and `tickets.for_host` accept `since`/`until`, bounding a
+ticket's `Created` date -- ticket age, not last activity, and unlike
+`fleet.inventory`'s connection state, a `Created` date never moves
+retroactively, so the bound can only narrow which open tickets are in view,
+never hide one that is still open. `total_matching` and
+`breakdown.tickets_by_queue` reflect Request Tracker's own exact count for
+the bounded query.
+
 Request Tracker evidence is metadata only -- subject, queue, status, owner,
 and dates. Ticket content and transaction history are never fetched; see
 "How sensitive is the content?" in

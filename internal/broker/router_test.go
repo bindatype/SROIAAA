@@ -130,18 +130,15 @@ func TestRouterDeniesUnauthorizedLiveRoutes(t *testing.T) {
 	}
 }
 
-func TestRouterTicketIntentsRejectTimeBoundsAndWrongFields(t *testing.T) {
+func TestRouterTicketIntentsRejectWrongFields(t *testing.T) {
 	router := newTestRouter(t)
 	tests := []struct {
 		name    string
 		request RouteRequest
 	}{
 		{"open tickets reject host", RouteRequest{Intent: IntentTicketsOpen, Host: "node01.example.edu"}},
-		{"open tickets reject since", RouteRequest{Intent: IntentTicketsOpen, Since: "24h"}},
 		{"tickets for host require host", RouteRequest{Intent: IntentTicketsByHost}},
 		{"tickets for host reject resource", RouteRequest{Intent: IntentTicketsByHost, Host: "node01.example.edu", Resource: "x"}},
-		{"tickets for host reject since", RouteRequest{Intent: IntentTicketsByHost, Host: "node01.example.edu", Since: "2026-08-01"}},
-		{"tickets for host reject until", RouteRequest{Intent: IntentTicketsByHost, Host: "node01.example.edu", Until: "2026-08-02"}},
 		{"open tickets reject match", RouteRequest{Intent: IntentTicketsOpen, Match: "panic"}},
 		{"open tickets reject limit", RouteRequest{Intent: IntentTicketsOpen, Limit: 5}},
 	}
@@ -154,10 +151,43 @@ func TestRouterTicketIntentsRejectTimeBoundsAndWrongFields(t *testing.T) {
 	}
 }
 
+// Unlike fleet.inventory or agent.status, a ticket's Created date is not
+// current state, so since/until narrow "how old" rather than hide anything
+// that is still open. Both intents must accept them and carry the bound
+// through to the plan.
+func TestRouterTicketIntentsAcceptTimeBounds(t *testing.T) {
+	router := newTestRouter(t)
+
+	openPlan, err := router.Plan(RouteRequest{Intent: IntentTicketsOpen, Until: "2026-07-04"})
+	if err != nil {
+		t.Fatalf("plan tickets.open with until: %v", err)
+	}
+	if openPlan.Steps[0].Until == "" {
+		t.Fatal("tickets.open plan lost the until bound")
+	}
+
+	hostPlan, err := router.Plan(RouteRequest{
+		Intent: IntentTicketsByHost, Host: "node01.example.edu",
+		Since: "2026-01-01", Until: "2026-06-01",
+	})
+	if err != nil {
+		t.Fatalf("plan tickets.for_host with since/until: %v", err)
+	}
+	if hostPlan.Steps[0].Since == "" || hostPlan.Steps[0].Until == "" {
+		t.Fatalf("tickets.for_host plan lost a time bound: %+v", hostPlan.Steps[0])
+	}
+
+	// A malformed bound is still refused by the shared since/until parser, not
+	// silently ignored.
+	if _, err := router.Plan(RouteRequest{Intent: IntentTicketsOpen, Since: "not-a-time"}); err == nil {
+		t.Fatal("expected a malformed since to be rejected")
+	}
+}
+
 func TestRouterVerifyAcceptsTicketPlans(t *testing.T) {
 	router := newTestRouter(t)
 
-	openPlan, err := router.Plan(RouteRequest{Intent: IntentTicketsOpen})
+	openPlan, err := router.Plan(RouteRequest{Intent: IntentTicketsOpen, Until: "2026-07-04"})
 	if err != nil {
 		t.Fatalf("plan tickets.open: %v", err)
 	}
@@ -182,6 +212,17 @@ func TestRouterVerifyAcceptsTicketPlans(t *testing.T) {
 	tampered.Steps = steps
 	if err := router.Verify(tampered); err == nil {
 		t.Fatal("Verify() accepted a tickets.for_host plan with a substituted action")
+	}
+
+	// An until bound that fails the shared parser -- here, one further in the
+	// future than "now" allows -- still fails reconstruction, the same way an
+	// invalid since/until does for monitoring.problems and monitoring.history.
+	tamperedBound := openPlan
+	boundSteps := append([]RouteStep(nil), tamperedBound.Steps...)
+	boundSteps[0].Until = "2099-01-01T00:00:00Z"
+	tamperedBound.Steps = boundSteps
+	if err := router.Verify(tamperedBound); err == nil {
+		t.Fatal("Verify() accepted a tickets.open plan with an out-of-range until bound")
 	}
 }
 
@@ -511,8 +552,10 @@ func TestTimeBoundContract(t *testing.T) {
 		{"live.evidence refuses", RouteRequest{Intent: IntentLiveEvidence, Host: "node01.example.edu", Resource: "system-messages"}, false},
 		{"monitoring.problems accepts", RouteRequest{Intent: IntentMonitoringProblems}, true},
 		{"monitoring.history accepts", RouteRequest{Intent: IntentMonitoringHistory}, true},
-		{"tickets.open refuses", RouteRequest{Intent: IntentTicketsOpen}, false},
-		{"tickets.for_host refuses", RouteRequest{Intent: IntentTicketsByHost, Host: "node01.example.edu"}, false},
+		// A ticket's Created date never moves retroactively, so a bound can only
+		// narrow which open tickets are in view, never hide one still open.
+		{"tickets.open accepts", RouteRequest{Intent: IntentTicketsOpen}, true},
+		{"tickets.for_host accepts", RouteRequest{Intent: IntentTicketsByHost, Host: "node01.example.edu"}, true},
 	}
 
 	for _, test := range tests {

@@ -106,15 +106,19 @@ func ToolDefinition(intents []string) any {
 					"until": map[string]any{
 						"type": "string",
 						"description": "Close the window since opens. Same forms; a plain date means the end of that day. " +
-							"For monitoring.problems and monitoring.history only. " +
-							"Without it a bound is a ray, and a question about one past day is answered from today.",
+							"For monitoring.problems, monitoring.history, tickets.open, and tickets.for_host only. " +
+							"Without it a bound is a ray, and a question about one past day is answered from today. " +
+							"For tickets.open/tickets.for_host this bounds Created (ticket age), not last activity.",
 					},
 					"since": map[string]any{
 						"type": "string",
-						"description": "Bound evidence to what CHANGED after this moment. RFC 3339, a date such as 2026-08-28, " +
-							"or a window such as 24h or 7d. For monitoring.problems and monitoring.history only; " +
-							"the other intents report current state and refuse a bound rather than ignore it. " +
-							"A question about what is wrong NOW takes no bound, whatever time it mentions.",
+						"description": "For monitoring.problems/monitoring.history, bound evidence to what CHANGED after this " +
+							"moment. For tickets.open/tickets.for_host, bound evidence to tickets CREATED after this " +
+							"moment -- ticket age, never a reason a still-open ticket goes missing. RFC 3339, a date " +
+							"such as 2026-08-28, or a window such as 24h or 7d. " +
+							"Not for database.query, which bounds time in its WHERE clause; not for fleet.inventory, " +
+							"agent.status, or live.evidence, which report current state and refuse a bound rather than " +
+							"ignore it. A question about what is wrong NOW takes no bound, whatever time it mentions.",
 					},
 					"match": map[string]any{
 						"type": "string",

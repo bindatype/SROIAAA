@@ -213,34 +213,31 @@ func (r *Router) Plan(request RouteRequest) (RoutePlan, error) {
 		if request.Host != "" || request.Resource != "" {
 			return RoutePlan{}, newRouteError("invalid_request", "tickets.open does not accept host or resource")
 		}
-		if request.Since != "" || request.Until != "" {
-			// Same trap as fleet.inventory: "open" is current ticket status, not
-			// a property of when the ticket was created. Bounding it by a time
-			// window would exclude a ticket opened outside that window but still
-			// sitting open today, and the narrower result would read as "quiet".
-			return RoutePlan{}, newRouteError("invalid_request",
-				"tickets.open reports tickets that are open right now and takes no since or until; "+
-					"a ticket does not stop being open because it was opened outside a window")
-		}
+		// Unlike fleet.inventory's connection state or a Zabbix trigger's
+		// last-changed time, a ticket's Created date never moves retroactively:
+		// bounding by it cannot hide a ticket that is still open, only select
+		// which open tickets to look at. So since/until are honoured here, filtered
+		// on Created, to answer "how many old open tickets" with RT's own exact
+		// count rather than a model counting dates off a truncated page.
 		return newPlan(request.Intent, RouteStep{
 			Source: SourceRequestTracker,
 			Action: "tickets.search",
 			Limit:  ticketSearchLimit,
+			Since:  sinceValue,
+			Until:  untilValue,
 		}), nil
 
 	case IntentTicketsByHost:
 		if err := requireHostOnly(request); err != nil {
 			return RoutePlan{}, err
 		}
-		if request.Since != "" || request.Until != "" {
-			return RoutePlan{}, newRouteError("invalid_request",
-				"tickets.for_host reports open tickets that mention this host and takes no since or until")
-		}
 		return newPlan(request.Intent, RouteStep{
 			Source: SourceRequestTracker,
 			Action: "tickets.search",
 			Host:   request.Host,
 			Limit:  ticketSearchLimit,
+			Since:  sinceValue,
+			Until:  untilValue,
 		}), nil
 
 	default:
@@ -405,10 +402,10 @@ func (r *Router) candidateRequests(plan RoutePlan) []RouteRequest {
 		return requests
 
 	case IntentTicketsOpen:
-		return []RouteRequest{{Intent: plan.Intent}}
+		return []RouteRequest{{Intent: plan.Intent, Since: plan.Steps[0].Since, Until: plan.Steps[0].Until}}
 
 	case IntentTicketsByHost:
-		return []RouteRequest{{Intent: plan.Intent, Host: host}}
+		return []RouteRequest{{Intent: plan.Intent, Host: host, Since: plan.Steps[0].Since, Until: plan.Steps[0].Until}}
 
 	default:
 		return nil
