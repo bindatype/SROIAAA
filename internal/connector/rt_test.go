@@ -362,12 +362,58 @@ func TestRTConnectorBreaksDownByOwner(t *testing.T) {
 	}
 	found := false
 	for _, warning := range evidence.Warnings {
-		if strings.Contains(warning, "only owners visible on this page") {
+		if strings.Contains(warning, "accounts for 19 of 304") {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("warnings = %v, want a warning that the owner breakdown only covers this page", evidence.Warnings)
+		t.Fatalf("warnings = %v, want a warning naming how much of the total is unaccounted for", evidence.Warnings)
+	}
+}
+
+// The completeness proof: when discovered owners' exact counts already sum
+// to the query's total, no owner outside that set can exist -- Owner is
+// single-valued per ticket -- so the breakdown is exact even though the page
+// itself was truncated, and no warning should claim otherwise.
+func TestRTConnectorOwnerBreakdownIsCompleteWhenCountsSumToTotal(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query().Get("query")
+		if r.URL.Query().Get("per_page") == "1" {
+			switch {
+			case strings.Contains(query, "Owner = 'alice'"):
+				w.Write([]byte(`{"total":3,"items":[]}`))
+			case strings.Contains(query, "Owner = 'bob'"):
+				w.Write([]byte(`{"total":2,"items":[]}`))
+			default:
+				w.Write([]byte(`{"total":0,"items":[]}`))
+			}
+			return
+		}
+		// total:5 with only 2 returned, so the page is truncated -- but alice
+		// (3) and bob (2) between them already account for all 5.
+		w.Write([]byte(`{"total":5,"items":[
+			{"id":"1","Subject":"a","Status":"open","Queue":"Ops","Owner":"alice"},
+			{"id":"2","Subject":"b","Status":"open","Queue":"Ops","Owner":"bob"}
+		]}`))
+	}))
+	defer server.Close()
+
+	connector := newTestRT(t, server.URL, []string{"Ops"})
+	evidence, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceRequestTracker,
+		Action: "tickets.search",
+		Limit:  2,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !evidence.Truncated {
+		t.Fatal("5 matching against 2 returned should be truncated")
+	}
+	for _, warning := range evidence.Warnings {
+		if strings.Contains(warning, "tickets_by_owner") {
+			t.Errorf("unexpected owner-breakdown warning on a provably complete breakdown: %q", warning)
+		}
 	}
 }
 

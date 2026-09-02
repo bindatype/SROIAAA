@@ -194,9 +194,15 @@ func (c *RTConnector) Execute(ctx context.Context, step broker.RouteStep) (Evide
 		evidence.Breakdown = map[string]map[string]int{"tickets_by_queue": breakdown}
 	}
 
-	// Owners are discovered from the page rather than configured, so the
-	// breakdown is only ever a census over what this fetch happened to see --
-	// never a claim about owners with tickets outside it.
+	// Owners are discovered from the page rather than configured, so in
+	// general the breakdown is only a census over what this fetch happened to
+	// see. But each owner's count comes from RT directly, not from the page,
+	// and Owner is single-valued per ticket -- so if the counts already sum to
+	// every matching ticket, no owner outside the discovered set can exist,
+	// and the breakdown is exactly as complete as tickets_by_queue is. This is
+	// the same reasoning the Zabbix connector uses for its severity census:
+	// severities partition the result, so their sum needs no separate total
+	// call to be trusted as exact.
 	owners, ownersCapped := ownersOnPage(items)
 	if len(owners) > 0 {
 		breakdown, err := c.ownerCensus(ctx, owners, step.Host, since, until)
@@ -207,15 +213,27 @@ func (c *RTConnector) Execute(ctx context.Context, step broker.RouteStep) (Evide
 			evidence.Breakdown = make(map[string]map[string]int, 1)
 		}
 		evidence.Breakdown["tickets_by_owner"] = breakdown
-		if evidence.Truncated {
-			evidence.Warnings = append(evidence.Warnings,
-				"tickets_by_owner covers only owners visible on this page; an owner with no tickets in the "+
-					"returned sample is missing even if they own tickets elsewhere in total_matching -- "+
-					"report these counts as a floor, never as the full distribution, when truncated is true")
+
+		accounted := 0
+		for _, count := range breakdown {
+			accounted += count
 		}
-		if ownersCapped {
+		switch {
+		case ownersCapped:
 			evidence.Warnings = append(evidence.Warnings, fmt.Sprintf(
-				"tickets_by_owner covers only the first %d distinct owners seen on this page", maxRTOwnerCensus))
+				"tickets_by_owner covers only the first %d distinct owners seen on this page; "+
+					"%d matching ticket(s) belong to owners not accounted for above",
+				maxRTOwnerCensus, total-accounted))
+		case accounted < total:
+			evidence.Warnings = append(evidence.Warnings, fmt.Sprintf(
+				"tickets_by_owner accounts for %d of %d matching tickets; the other %d belong to owners "+
+					"with no ticket on this returned page, so they were never discovered -- "+
+					"report these counts as a floor, never as the full distribution",
+				accounted, total, total-accounted))
+		default:
+			// Every matching ticket's owner was discovered and counted exactly,
+			// so the breakdown is complete even though the page itself was
+			// truncated: no warning is a claim, not an omission.
 		}
 	}
 
