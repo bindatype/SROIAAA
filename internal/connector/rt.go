@@ -27,6 +27,11 @@ const (
 	// allowlist is operator-curated and expected to be short; a long one is a
 	// configuration smell, not something to fan requests across silently.
 	maxRTQueueCensus = 20
+	// maxRTOwnerCensus bounds the per-owner breakdown fan-out. Unlike queues,
+	// owners are not operator-curated -- they are discovered from whichever
+	// tickets came back -- so this exists purely to cap the round-trip cost,
+	// not to reflect a configuration decision.
+	maxRTOwnerCensus = 20
 )
 
 // rtActions is the fixed action table. A plan may only name an action that
@@ -149,7 +154,7 @@ func (c *RTConnector) Execute(ctx context.Context, step broker.RouteStep) (Evide
 		return Evidence{}, err
 	}
 
-	query := ticketSearchQuery(step.Host, since, until, c.queues)
+	query := ticketSearchQuery(step.Host, "", since, until, c.queues)
 	requestedAt := time.Now().UTC()
 	items, total, err := c.search(ctx, query, limit)
 	if err != nil {
@@ -187,6 +192,31 @@ func (c *RTConnector) Execute(ctx context.Context, step broker.RouteStep) (Evide
 			return Evidence{}, err
 		}
 		evidence.Breakdown = map[string]map[string]int{"tickets_by_queue": breakdown}
+	}
+
+	// Owners are discovered from the page rather than configured, so the
+	// breakdown is only ever a census over what this fetch happened to see --
+	// never a claim about owners with tickets outside it.
+	owners, ownersCapped := ownersOnPage(items)
+	if len(owners) > 0 {
+		breakdown, err := c.ownerCensus(ctx, owners, step.Host, since, until)
+		if err != nil {
+			return Evidence{}, err
+		}
+		if evidence.Breakdown == nil {
+			evidence.Breakdown = make(map[string]map[string]int, 1)
+		}
+		evidence.Breakdown["tickets_by_owner"] = breakdown
+		if evidence.Truncated {
+			evidence.Warnings = append(evidence.Warnings,
+				"tickets_by_owner covers only owners visible on this page; an owner with no tickets in the "+
+					"returned sample is missing even if they own tickets elsewhere in total_matching -- "+
+					"report these counts as a floor, never as the full distribution, when truncated is true")
+		}
+		if ownersCapped {
+			evidence.Warnings = append(evidence.Warnings, fmt.Sprintf(
+				"tickets_by_owner covers only the first %d distinct owners seen on this page", maxRTOwnerCensus))
+		}
 	}
 
 	return evidence, nil
@@ -245,7 +275,7 @@ func (c *RTConnector) queueCensus(ctx context.Context, host, since, until string
 	counts := make(map[string]int, len(c.queues))
 	for _, queue := range c.queues {
 		values := url.Values{}
-		values.Set("query", ticketSearchQuery(host, since, until, []string{queue}))
+		values.Set("query", ticketSearchQuery(host, "", since, until, []string{queue}))
 		values.Set("per_page", "1")
 
 		body, status, err := c.get(ctx, "/REST/2.0/tickets", values)
@@ -263,6 +293,61 @@ func (c *RTConnector) queueCensus(ctx context.Context, host, since, until string
 		}
 		if envelope.Total > 0 {
 			counts[queue] = envelope.Total
+		}
+	}
+	return counts, nil
+}
+
+// ownersOnPage lists the distinct ticket owners present in a fetched page, in
+// first-seen order, capped at maxRTOwnerCensus. Unlike the queue allowlist
+// this is not configuration -- it is only ever what happened to come back on
+// this one fetch, which is exactly what the caller must warn about when the
+// page was truncated.
+func ownersOnPage(items []EvidenceItem) (owners []string, capped bool) {
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		owner := item.Fields["owner"]
+		if owner == "" {
+			continue
+		}
+		if _, ok := seen[owner]; ok {
+			continue
+		}
+		seen[owner] = struct{}{}
+		owners = append(owners, owner)
+	}
+	if len(owners) > maxRTOwnerCensus {
+		owners = owners[:maxRTOwnerCensus]
+		capped = true
+	}
+	return owners, capped
+}
+
+// ownerCensus counts matching tickets per discovered owner, the same
+// exact-count-via-a-narrower-search technique queueCensus uses, applied to a
+// set this connector discovered rather than one an operator configured.
+func (c *RTConnector) ownerCensus(ctx context.Context, owners []string, host, since, until string) (map[string]int, error) {
+	counts := make(map[string]int, len(owners))
+	for _, owner := range owners {
+		values := url.Values{}
+		values.Set("query", ticketSearchQuery(host, owner, since, until, c.queues))
+		values.Set("per_page", "1")
+
+		body, status, err := c.get(ctx, "/REST/2.0/tickets", values)
+		if err != nil {
+			return nil, err
+		}
+		if status != http.StatusOK {
+			return nil, rtStatusError(status, body)
+		}
+		var envelope struct {
+			Total int `json:"total"`
+		}
+		if err := json.Unmarshal(body, &envelope); err != nil {
+			return nil, newConnectorError("decode_response", err.Error())
+		}
+		if envelope.Total > 0 {
+			counts[owner] = envelope.Total
 		}
 	}
 	return counts, nil
@@ -320,10 +405,11 @@ func rtStatusError(status int, body []byte) error {
 // values that already passed policy, the same separation the Zabbix and
 // Wazuh connectors keep between an authorized request and the query that
 // implements it.
-// since and until are RT-formatted date literals (see rtDateBound), already
-// bounded and normalized by the broker before this function ever sees them --
-// never raw request text.
-func ticketSearchQuery(host, since, until string, queues []string) string {
+// owner narrows to one ticket owner, used by ownerCensus; empty means every
+// owner. since and until are RT-formatted date literals (see rtDateBound),
+// already bounded and normalized by the broker before this function ever
+// sees them -- never raw request text.
+func ticketSearchQuery(host, owner, since, until string, queues []string) string {
 	// New, open, and stalled are RT's active statuses. Resolved, rejected, and
 	// deleted tickets are excluded: "what is open" means work nobody has
 	// closed out, not a full history of the queue.
@@ -341,6 +427,9 @@ func ticketSearchQuery(host, since, until string, queues []string) string {
 		// different sensitivity decision than filtering by subject line and one
 		// this connector does not make silently.
 		parts = append(parts, fmt.Sprintf("Subject LIKE '%s'", rtEscape(host)))
+	}
+	if owner != "" {
+		parts = append(parts, fmt.Sprintf("Owner = '%s'", rtEscape(owner)))
 	}
 	if since != "" {
 		parts = append(parts, fmt.Sprintf("Created > '%s'", since))

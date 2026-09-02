@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -257,14 +258,21 @@ func TestRTConnectorSkipsQueueCensusWhenAllowlistIsLarge(t *testing.T) {
 }
 
 func TestTicketSearchQueryEscapesQuotes(t *testing.T) {
-	query := ticketSearchQuery("o'brien", "", "", []string{"Ops"})
+	query := ticketSearchQuery("o'brien", "", "", "", []string{"Ops"})
 	if !strings.Contains(query, `Subject LIKE 'o\'brien'`) {
 		t.Errorf("query = %q, want an escaped quote", query)
 	}
 }
 
+func TestTicketSearchQueryFiltersByOwner(t *testing.T) {
+	query := ticketSearchQuery("", "jcreech@gwu.edu", "", "", []string{"Ops"})
+	if !strings.Contains(query, "Owner = 'jcreech@gwu.edu'") {
+		t.Errorf("query = %q, want an Owner filter", query)
+	}
+}
+
 func TestTicketSearchQueryAddsCreatedBounds(t *testing.T) {
-	query := ticketSearchQuery("", "2026-01-01 00:00:00", "2026-07-04 00:00:00", []string{"Ops"})
+	query := ticketSearchQuery("", "", "2026-01-01 00:00:00", "2026-07-04 00:00:00", []string{"Ops"})
 	if !strings.Contains(query, "Created > '2026-01-01 00:00:00'") {
 		t.Errorf("query = %q, want a Created lower bound", query)
 	}
@@ -306,6 +314,79 @@ func TestRTConnectorFiltersByCreatedDate(t *testing.T) {
 	}
 	if evidence.Until != "2026-07-04T00:00:00Z" {
 		t.Errorf("evidence.Until = %q, want the applied bound echoed back", evidence.Until)
+	}
+}
+
+func TestRTConnectorBreaksDownByOwner(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query().Get("query")
+		if r.URL.Query().Get("per_page") == "1" {
+			switch {
+			case strings.Contains(query, "Owner = 'jcreech@gwu.edu'"):
+				w.Write([]byte(`{"total":16,"items":[]}`))
+			case strings.Contains(query, "Owner = 'Nobody'"):
+				w.Write([]byte(`{"total":3,"items":[]}`))
+			default:
+				w.Write([]byte(`{"total":0,"items":[]}`))
+			}
+			return
+		}
+		w.Write([]byte(`{"total":304,"items":[
+			{"id":"1","Subject":"a","Status":"open","Queue":"Ops","Owner":"jcreech@gwu.edu"},
+			{"id":"2","Subject":"b","Status":"open","Queue":"Ops","Owner":"Nobody"},
+			{"id":"3","Subject":"c","Status":"open","Queue":"Ops","Owner":"jcreech@gwu.edu"}
+		]}`))
+	}))
+	defer server.Close()
+
+	connector := newTestRT(t, server.URL, []string{"Ops"})
+	evidence, err := connector.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceRequestTracker,
+		Action: "tickets.search",
+		Limit:  3,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	// Exact per-owner counts from RT, not a tally of the 3 returned rows.
+	if evidence.Breakdown["tickets_by_owner"]["jcreech@gwu.edu"] != 16 {
+		t.Errorf("tickets_by_owner[jcreech@gwu.edu] = %d, want 16", evidence.Breakdown["tickets_by_owner"]["jcreech@gwu.edu"])
+	}
+	if evidence.Breakdown["tickets_by_owner"]["Nobody"] != 3 {
+		t.Errorf("tickets_by_owner[Nobody] = %d, want 3", evidence.Breakdown["tickets_by_owner"]["Nobody"])
+	}
+
+	if !evidence.Truncated {
+		t.Fatal("304 matching against 3 returned should be truncated")
+	}
+	found := false
+	for _, warning := range evidence.Warnings {
+		if strings.Contains(warning, "only owners visible on this page") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("warnings = %v, want a warning that the owner breakdown only covers this page", evidence.Warnings)
+	}
+}
+
+func TestOwnersOnPageCapsAndFlags(t *testing.T) {
+	items := make([]EvidenceItem, 0, maxRTOwnerCensus+5)
+	for i := 0; i < maxRTOwnerCensus+5; i++ {
+		items = append(items, EvidenceItem{Fields: map[string]string{"owner": fmt.Sprintf("owner%d@gwu.edu", i)}})
+	}
+	owners, capped := ownersOnPage(items)
+	if len(owners) != maxRTOwnerCensus {
+		t.Fatalf("len(owners) = %d, want %d", len(owners), maxRTOwnerCensus)
+	}
+	if !capped {
+		t.Error("expected capped to be true when more distinct owners exist than the cap")
+	}
+
+	fewer, fewerCapped := ownersOnPage(items[:3])
+	if len(fewer) != 3 || fewerCapped {
+		t.Errorf("ownersOnPage(3 items) = %v, capped=%v", fewer, fewerCapped)
 	}
 }
 
