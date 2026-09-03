@@ -37,9 +37,20 @@ func TestPromptCountsItsOwnChannels(t *testing.T) {
 	if !ok {
 		t.Fatalf("no spelling for %d intents; extend this table", len(broker.AllIntents()))
 	}
-	phrase := "these " + want + " evidence channels"
-	if !strings.Contains(systemPrompt, phrase) {
-		t.Errorf("prompt does not say %q, but the broker offers %d intents", phrase, len(broker.AllIntents()))
+	// The count is stated twice, at the top as channels and in the closing
+	// contract as intents. Only the first was guarded, and on 2026-09-03 the
+	// prompt said eight channels in one place and five intents in the other --
+	// two instructions to the same model in the same document, disagreeing.
+	// Every place the number appears has to be checked, or guarding one of
+	// them just moves the staleness somewhere unwatched.
+	for _, phrase := range []string{
+		"these " + want + " evidence channels",
+		"these " + want + " intents",
+	} {
+		if !strings.Contains(systemPrompt, phrase) {
+			t.Errorf("prompt does not say %q, but the broker offers %d intents",
+				phrase, len(broker.AllIntents()))
+		}
 	}
 }
 
