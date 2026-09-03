@@ -153,3 +153,21 @@ func TestPromptTeachesTicketAgeDirection(t *testing.T) {
 		}
 	}
 }
+
+// TestPromptTeachesEndpointEvidence guards the rule that arrived with the
+// endpoint connector. live.evidence is the only channel whose result lands in
+// `data` rather than `items`, which puts a countable array directly in front
+// of a model that is told everywhere else never to count arrays. Without this
+// paragraph the model has a raw list, a prohibition, and no stated way to
+// answer "how many" that is neither a refusal nor a violation.
+func TestPromptTeachesEndpointEvidence(t *testing.T) {
+	for _, phrase := range []string{
+		"Counts still come from `summary`, never from `data`",
+		"`summary.entries`",
+		"supports no population claim",
+	} {
+		if !strings.Contains(systemPrompt, phrase) {
+			t.Errorf("prompt no longer tells the model how to read endpoint evidence: missing %q", phrase)
+		}
+	}
+}

@@ -153,3 +153,90 @@ func validSROIAAAStep() broker.RouteStep {
 		Params:    &broker.OperationParams{MaxBytes: 128},
 	}
 }
+
+// TestSROIAAAEvidenceCarriesComputedCounts pins the rule every other connector
+// already follows: a population figure is computed here, in code, never left
+// for a model to tally off the rows.
+//
+// The endpoint connector arrived without it. Data is the right shape for a
+// directory listing -- re-encoding it into synthetic rows would obscure what
+// an operator asked for -- but it reached the model as a raw array alongside a
+// prompt rule forbidding the model to count arrays, which leaves no way to
+// answer "how many" that is not either a refusal or a violation.
+func TestSROIAAAEvidenceCarriesComputedCounts(t *testing.T) {
+	tests := []struct {
+		operation string
+		data      map[string]any
+		wantKey   string
+		wantValue int
+		wantItems int
+	}{
+		{"filesystem.list", map[string]any{"path": "/workspace",
+			"entries": []any{map[string]any{"name": "a"}, map[string]any{"name": "b"}, map[string]any{"name": "c"}}},
+			"entries", 3, 3},
+		{"process.list", map[string]any{
+			"processes": []any{map[string]any{"pid": 1}, map[string]any{"pid": 2}},
+			"count":     float64(2)},
+			"processes", 2, 2},
+		{"filesystem.read", map[string]any{"path": "/var/log/x", "bytes_read": float64(5),
+			"content": map[string]any{"format": "text/plain; charset=utf-8", "raw": "hello"}},
+			"bytes", 5, 0},
+	}
+
+	for _, test := range tests {
+		t.Run(test.operation, func(t *testing.T) {
+			summary, items, warnings := summarizeAgentData(test.operation, test.data)
+			if summary[test.wantKey] != test.wantValue {
+				t.Errorf("summary[%q] = %d, want %d", test.wantKey, summary[test.wantKey], test.wantValue)
+			}
+			if items != test.wantItems {
+				t.Errorf("item count = %d, want %d", items, test.wantItems)
+			}
+			if len(warnings) != 0 {
+				t.Errorf("unexpected warnings on well-formed data: %v", warnings)
+			}
+		})
+	}
+}
+
+// TestSROIAAACountsAreMeasuredNotBelieved asserts the agent's own figure is
+// checked rather than copied. An agent that miscounts is a defect worth
+// naming, and copying its number would launder that defect into evidence.
+func TestSROIAAACountsAreMeasuredNotBelieved(t *testing.T) {
+	summary, _, warnings := summarizeAgentData("process.list", map[string]any{
+		"processes": []any{map[string]any{"pid": 1}, map[string]any{"pid": 2}},
+		"count":     float64(97),
+	})
+	if summary["processes"] != 2 {
+		t.Errorf("summary reported %d processes; the two that arrived are what exists", summary["processes"])
+	}
+	if len(warnings) == 0 {
+		t.Fatal("the agent claimed 97 processes and sent 2, and nothing said so")
+	}
+	if !strings.Contains(warnings[0], "97") || !strings.Contains(warnings[0], "2") {
+		t.Errorf("the warning must name both figures so a reader can see the disagreement; got %q", warnings[0])
+	}
+}
+
+// TestSROIAAAUncountableDataWarns asserts that evidence supporting no
+// population claim says so. A count that was never computed is not zero, and
+// every mechanism in this project that expressed that by omission has been
+// read the reassuring way.
+func TestSROIAAAUncountableDataWarns(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		operation string
+		data      any
+	}{
+		{"unknown operation", "filesystem.newthing", map[string]any{"whatever": 1}},
+		{"data is not an object", "filesystem.list", []any{"a", "b"}},
+		{"entries missing", "filesystem.list", map[string]any{"path": "/x"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, warnings := summarizeAgentData(test.operation, test.data)
+			if len(warnings) == 0 {
+				t.Error("evidence that supports no population claim returned no warning saying so")
+			}
+		})
+	}
+}

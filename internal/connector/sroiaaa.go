@@ -3,6 +3,7 @@ package connector
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -244,15 +245,123 @@ func (c *SROIAAAConnector) Execute(ctx context.Context, step broker.RouteStep) (
 		return Evidence{}, newConnectorError("decode_response", fmt.Sprintf("endpoint agent data: %v", err))
 	}
 
+	summary, items, warnings := summarizeAgentData(step.Operation, data)
+	if decoded.Metadata.Truncated {
+		// A truncated result is a defect in the answer, not a footnote to it:
+		// the figures below describe what arrived, not what exists.
+		warnings = append(warnings, fmt.Sprintf(
+			"the endpoint agent truncated this %s at its own limit; every count here describes "+
+				"what was returned, not what is on the host", step.Operation))
+	}
+
 	return Evidence{
 		Source:      string(broker.SourceSROIAAA),
 		Action:      step.Action,
 		Endpoint:    redactEndpoint(agent.endpoint),
 		RequestedAt: requestedAt,
 		DurationMS:  time.Since(requestedAt).Milliseconds(),
+		ItemCount:   items,
+		Summary:     summary,
+		Warnings:    warnings,
 		Truncated:   decoded.Metadata.Truncated,
 		Data:        data,
 	}, nil
+}
+
+// summarizeAgentData computes, in code, the counts a model is forbidden to
+// tally for itself.
+//
+// Every other connector places population figures in Summary because a model
+// asked to count several hundred records will sometimes get it wrong and state
+// the wrong number with confidence: one asked to tally 275 rows answered 55
+// against a true 52, and asked for a total reported the page limit of 25
+// against a true 1841. Endpoint evidence arrives as the agent's own JSON in
+// Data rather than as Items, which is the right shape for a file read or a
+// directory listing, but it arrived without those figures -- leaving the model
+// a raw array and a prompt rule telling it not to count arrays.
+//
+// Where the agent reports a figure of its own, it is checked rather than
+// copied. A disagreement is a defect in the answer and is warned about, not
+// quietly resolved in either direction.
+func summarizeAgentData(operation string, data any) (map[string]int, int, []string) {
+	object, ok := data.(map[string]any)
+	if !ok {
+		return nil, 0, []string{fmt.Sprintf(
+			"no counts were computed: %s returned a %T rather than an object, so this evidence "+
+				"supports no population claim", operation, data)}
+	}
+
+	summary := map[string]int{}
+	warnings := []string{}
+	items := 0
+
+	countList := func(field string) (int, bool) {
+		values, ok := object[field].([]any)
+		if !ok {
+			warnings = append(warnings, fmt.Sprintf(
+				"no count was computed for %s: %s is missing or is not a list, so any number "+
+					"quoted from this evidence would be read off the rows", operation, field))
+			return 0, false
+		}
+		return len(values), true
+	}
+
+	// The agent's own figure, checked against what actually arrived.
+	crossCheck := func(field string, counted int) {
+		reported, ok := object[field].(float64)
+		if !ok {
+			return
+		}
+		if int(reported) != counted {
+			warnings = append(warnings, fmt.Sprintf(
+				"the endpoint agent reported %s=%d but returned %d; the computed figure is used, "+
+					"and the disagreement means one of the two is wrong", field, int(reported), counted))
+		}
+	}
+
+	switch operation {
+	case "filesystem.list":
+		if count, ok := countList("entries"); ok {
+			summary["entries"] = count
+			items = count
+		}
+	case "process.list":
+		if count, ok := countList("processes"); ok {
+			summary["processes"] = count
+			items = count
+			crossCheck("count", count)
+		}
+	case "filesystem.read", "filesystem.tail":
+		if content, ok := object["content"].(map[string]any); ok {
+			if raw, ok := content["raw"].(string); ok {
+				// Bytes as they will be read, which for a base64 body is the
+				// decoded length rather than the length of the encoding.
+				measured := len(raw)
+				if format, _ := content["format"].(string); strings.Contains(format, "base64") {
+					if decoded, err := base64.StdEncoding.DecodeString(raw); err == nil {
+						measured = len(decoded)
+					}
+				}
+				summary["bytes"] = measured
+				crossCheck("bytes_read", measured)
+			}
+		}
+		if lines, ok := object["lines"].(float64); ok {
+			summary["lines"] = int(lines)
+		}
+	case "filesystem.stat", "host.info", "capabilities.describe":
+		// Single records. There is no population to count, and inventing a
+		// count of one would invite a model to treat it as a total.
+	default:
+		warnings = append(warnings, fmt.Sprintf(
+			"no counts were computed: %s has no summary rule here, so this evidence supports "+
+				"no population claim", operation))
+	}
+
+	if len(summary) == 0 {
+		summary = nil
+	}
+	return summary, items, warnings
 }
 
 func agentResponseError(status int, response agentOperationResponse) error {

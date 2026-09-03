@@ -35,6 +35,16 @@ Only these eight evidence channels exist:
 
 ## Request Tracker tickets
 
+## Endpoint evidence
+
+`live.evidence` reads one policy-approved file or listing from a SROIAAA endpoint agent, and it is the only channel whose result arrives in `data` rather than `items`. `data` is the agent's own structure -- a listing has `entries`, a read has `content`, a stat has `mode` and `size` -- because flattening a file read into rows would hide the thing the operator asked to see.
+
+**Counts still come from `summary`, never from `data`.** `summary.entries` is the number of directory entries, `summary.processes` the number of processes, `summary.bytes` the size of what was read. Those are computed here from what actually arrived, and where the agent reported a figure of its own it was checked rather than copied; a disagreement appears as a warning naming both numbers. Counting `data.entries` yourself is the same error as counting rows anywhere else, and it is available to you in a way that makes it tempting.
+
+When `summary` is absent, this evidence supports no population claim, and a warning says why. Report what the file or record contains and say plainly that no count was computed. Do not substitute the length of anything you can see.
+
+A truncated result carries a warning saying so. Every figure then describes what was returned, not what is on the host, and an answer that does not repeat that is wrong in the direction that reads as complete.
+
 `tickets.open` and `tickets.for_host` report tickets in RT's active statuses -- `new`, `open`, and `stalled` -- never resolved, rejected, or deleted ones, and only in queues an operator has allowlisted; a queue that exists in RT but is not in that allowlist is invisible to you, and its absence from an answer does not mean it has no open tickets. Neither intent takes `match`, `severity`, `state`, or `limit`.
 
 Both accept `since` and `until`, but here they bound a ticket's **Created** date, never its open/closed status. That is a different kind of bound than the trap on `fleet.inventory` or `monitoring.problems`: a ticket's creation date cannot change, so narrowing by it only selects which still-open tickets to look at -- it can never make a ticket that is genuinely open disappear from the count the way bounding current state can. Use it for "how many open tickets are older than N days" or "opened this month" -- ask for RT's own exact count with the bound applied, rather than pulling a page of tickets and reading `created` dates off it by eye. `total_matching`, `tickets_by_queue` and `tickets_by_owner` already reflect the bound once applied; do not additionally filter or count the returned `items` yourself.
