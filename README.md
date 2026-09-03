@@ -339,7 +339,7 @@ These intents, and nothing else:
 | one agent's state, by exact name | `agent.status` | Wazuh API |
 | active problem triggers, optionally per host | `monitoring.problems` | Zabbix API |
 | what happened during a past window | `monitoring.history` | Zabbix API (event log) |
-| a policy-approved file from an endpoint | `live.evidence` | SROIAAA endpoint agent |
+| a policy-approved file from an endpoint | `live.evidence` | SROIAAA endpoint agent (no agent deployed yet) |
 | aggregate/ad hoc HPC accounting questions | `database.query` | PegasusDB (one read-only `SELECT`) |
 | open tickets in allowlisted queues | `tickets.open` | Request Tracker REST 2.0 |
 | open tickets mentioning a host, by subject | `tickets.for_host` | Request Tracker REST 2.0 |
@@ -361,6 +361,13 @@ Only intents whose connector is configured are offered to the model. Endpoint
 evidence is enabled by `SROIAAA_AGENT_CONFIG`, a host-to-agent map held in the
 operator environment, never in a route plan. Each host has its own endpoint
 and bearer token, and remote agents must use HTTPS:
+
+**No endpoint agent is deployed in this environment yet.** The connector is
+written and tested, and `cmd/sroiaaa-agent` has existed since Phase One, but
+nothing is running it as a service: there is no systemd unit and no host in
+`SROIAAA_AGENT_CONFIG`. Until one exists, `live.evidence` is planned and
+authorized by the broker and withheld from the model, exactly as it was before
+the connector was written. Deferred deliberately, not abandoned.
 
 ```bash
 export SROIAAA_AGENT_CONFIG='{
