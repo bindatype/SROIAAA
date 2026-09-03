@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -181,4 +182,95 @@ func TestPromptTeachesEndpointEvidence(t *testing.T) {
 			t.Errorf("prompt no longer tells the model how to read endpoint evidence: missing %q", phrase)
 		}
 	}
+}
+
+// pricedRules are the rules with an incident behind them. Each names the
+// marker that delimits it and a phrase that must survive any rewrite.
+//
+// The prompt has ~128 rules and, before this, three guards. A defensive
+// rewrite in August cut it from 12,376 to 10,706 bytes, scored the same on
+// the head-to-head suite, and silently dropped three rules -- the runTBL2
+// column list cost about two hours of guessed column names before anyone
+// worked out why. The lesson recorded then was that a fixed suite only
+// measures the shapes it contains. These are the shapes it did not contain.
+var pricedRules = []struct {
+	marker string
+	phrase string
+	cost   string
+}{
+	{"grouped-truncation", "leaves no visible trace",
+		"a grouped result loses half its groups with every returned row still well formed"},
+	{"runtbl2-columns", "groupName",
+		"the model guessed a Hostname column; one wasted turn per host question for ~2 hours"},
+	{"unrun-check-not-allclear", "reads as an",
+		"\"no critical agents are disconnected\" was posted while five were down"},
+	{"lead-with-broken", "people skim",
+		"a reader who stops after one sentence gets the opposite impression"},
+	{"counts-from-summary", "Never count the `items` list by hand",
+		"275 records tallied as 55 against a true 52; a total reported as the page limit"},
+	{"no-cve-source", "vulnerabilities or CVEs",
+		"a CVE question answered from Zabbix triggers, reporting no critical CVEs for a host that did not exist"},
+	{"oldruntbl-compressed", "compressed form",
+		"LIKE '%cpu004%' silently misses jobs recorded as cpu[004-005]"},
+	{"ingestion-lag", "ingestion frontier",
+		"CURDATE() selects a partial day and reports a fraction of it as a total"},
+	{"time-bound-contract", "refuse a bound rather than ignore it",
+		"live.evidence accepted a bound and dropped it until c9f4c3f"},
+	{"rt-metadata-only", "never the ticket body",
+		"RT tickets routinely carry user PII and credentials pasted into a support request"},
+	{"ticket-age-direction", "bounds the older side",
+		"an unbounded fetch tallied 100 of 428 rows by hand, 2026-09-02"},
+}
+
+// TestPricedRulesSurvive fails if a rule with a known cost has been reworded
+// away. String presence is a weak assertion and that is the point: it is cheap
+// enough to keep one per rule, and a rewrite cannot drop the rule without
+// turning this red.
+func TestPricedRulesSurvive(t *testing.T) {
+	for _, rule := range pricedRules {
+		if !strings.Contains(systemPrompt, rule.phrase) {
+			t.Errorf("the %s rule is gone (%q). What it cost last time: %s",
+				rule.marker, rule.phrase, rule.cost)
+		}
+	}
+}
+
+// TestPricedRulesAreMarkedForAblation asserts each is delimited, so its worth
+// can be measured by removing it rather than argued about. The markers are
+// stripped before the model sees them.
+func TestPricedRulesAreMarkedForAblation(t *testing.T) {
+	raw := rawPromptForTest(t)
+	for _, rule := range pricedRules {
+		marker := "<!-- rule:" + rule.marker + " -->"
+		if !strings.Contains(raw, marker) {
+			t.Errorf("%s carries no ablation marker, so its cost cannot be measured", rule.marker)
+			continue
+		}
+		// A marker not at the start of a line is invisible to the harness
+		// regex, which is how one rule was reported removed while its text
+		// stayed in place.
+		if !strings.Contains(raw, "\n"+marker+"\n") {
+			t.Errorf("%s marker is not alone on its own line; the ablation harness will not see it", rule.marker)
+		}
+	}
+}
+
+// TestPromptCarriesNoMarkersIntoTheModel asserts the stripping works. A model
+// reading "<!-- rule:grouped-truncation -->" is being handed a name for a rule
+// it is supposed to follow, not notice.
+func TestPromptCarriesNoMarkersIntoTheModel(t *testing.T) {
+	if strings.Contains(systemPrompt, "<!-- rule:") || strings.Contains(systemPrompt, "<!-- /rule -->") {
+		t.Error("ablation markers reached the assembled prompt; they must be stripped before the model sees them")
+	}
+}
+
+// rawPromptForTest reads prompt.md from disk, markers intact. systemPrompt has
+// been stripped, so a marker assertion has to read the source.
+func rawPromptForTest(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile("prompt.md")
+	if err != nil {
+		t.Fatalf("read prompt.md: %v", err)
+	}
+	return string(raw)
 }
