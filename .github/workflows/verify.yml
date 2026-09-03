@@ -1,0 +1,52 @@
+# The gate the project did not have.
+#
+# Until now nothing on GitHub ran a test. A green pull request page meant only
+# that nobody had looked, and `make verify` was a gate only while somebody
+# remembered to type it. This makes it automatic and, more importantly, makes
+# skipping it visible.
+#
+# What this cannot check is stated here rather than left to be assumed: it has
+# no credentials, so it never reaches Zabbix, Wazuh, PegasusDB, Request Tracker
+# or a model. A tree that is green here can still be wrong about every service
+# the project exists to read. `make test-rt-live` and `make eval-rt-shape` are
+# where that is decided, and they run on a host with an environment.
+name: verify
+
+on:
+  push:
+    branches: [main, glendev, rubeeldev]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # scripts/verify.sh reports every failure rather than aborting on the
+      # first, so one run shows everything that is wrong rather than the
+      # earliest thing.
+      - name: make verify
+        run: make verify
+
+      # Said out loud on every run, so a green check is never mistaken for
+      # evidence that the system works against the services it reads.
+      - name: what this run did not check
+        if: always()
+        run: |
+          echo "No credentials were available to this job."
+          echo "Nothing here touched Zabbix, Wazuh, PegasusDB, RT, or a model."
+          echo "Operational correctness is 'make test-rt-live' and 'make eval-rt-shape'."
