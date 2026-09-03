@@ -584,3 +584,48 @@ func TestTimeBoundContract(t *testing.T) {
 		})
 	}
 }
+
+// TestTicketAgeBoundStandsAlone pins the shape a question about ticket age
+// takes. "Older than 60 days" is an until with no since: the oldest tickets
+// are the ones being asked about, so a lower bound would cut off the answer.
+//
+// This exists because the model got it wrong in the field on 2026-09-02. It
+// sent no bound at all, received 100 of 428 matching tickets, and tallied
+// created dates and owners off that page -- reporting a property of the page
+// as a property of RT. The broker would have accepted the bounded request;
+// nothing had ever told the model to make it.
+func TestTicketAgeBoundStandsAlone(t *testing.T) {
+	router := newTestRouter(t)
+	tests := []struct {
+		name    string
+		request RouteRequest
+	}{
+		{"tickets.open", RouteRequest{Intent: IntentTicketsOpen, Until: "60d"}},
+		{"tickets.for_host", RouteRequest{Intent: IntentTicketsByHost, Host: "node01.example.edu", Until: "60d"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			plan, err := router.Plan(test.request)
+			if err != nil {
+				t.Fatalf("until without since must be a legal ticket bound, got %v", err)
+			}
+			if len(plan.Steps) != 1 {
+				t.Fatalf("expected one step, got %d", len(plan.Steps))
+			}
+			// The planner resolves a relative window to an absolute instant so
+			// the executor cannot re-resolve it later and answer a different
+			// question than the one authorized.
+			until, err := time.Parse(time.RFC3339, plan.Steps[0].Until)
+			if err != nil {
+				t.Fatalf("plan dropped or mangled the bound: until = %q (%v)", plan.Steps[0].Until, err)
+			}
+			if age := time.Since(until); age < 59*24*time.Hour || age > 61*24*time.Hour {
+				t.Errorf("until resolved to %s, which is %v ago; want about 60 days", until, age)
+			}
+			if plan.Steps[0].Since != "" {
+				t.Errorf("plan invented a lower bound: since = %q, want empty", plan.Steps[0].Since)
+			}
+		})
+	}
+}

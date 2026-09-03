@@ -108,7 +108,9 @@ func ToolDefinition(intents []string) any {
 						"description": "Close the window since opens. Same forms; a plain date means the end of that day. " +
 							"For monitoring.problems, monitoring.history, tickets.open, and tickets.for_host only. " +
 							"Without it a bound is a ray, and a question about one past day is answered from today. " +
-							"For tickets.open/tickets.for_host this bounds Created (ticket age), not last activity.",
+							"For tickets.open/tickets.for_host this bounds Created (ticket age), not last activity, " +
+							"and stands alone: \"older than 60 days\" is until: 60d with no since, because adding " +
+							"one would cut off the oldest tickets the question is about.",
 					},
 					"since": map[string]any{
 						"type": "string",

@@ -131,3 +131,25 @@ func TestEvidenceBudgetExceedsWhatConnectorsReturn(t *testing.T) {
 			maxEvidenceJSON, largestConnectorPayload)
 	}
 }
+
+// TestPromptTeachesTicketAgeDirection guards the mapping the model got wrong
+// in the field on 2026-09-02: "older than N days" is an `until`, not a
+// `since`, and it stands alone. The prompt told the model to ask RT for an
+// exact count with the bound applied, and separately that a lone `since` is a
+// ray; it never said which field carries ticket age. The model sent no bound,
+// got 100 of 428 tickets, and tallied dates and owners off the page.
+//
+// This asserts the guidance is present, not that a model follows it. Only an
+// eval can show the second, and there is no RT eval harness yet.
+func TestPromptTeachesTicketAgeDirection(t *testing.T) {
+	required := []string{
+		"`until` bounds the older side",
+		"`until: 60d`",
+		"breakdown.tickets_by_owner",
+	}
+	for _, phrase := range required {
+		if !strings.Contains(systemPrompt, phrase) {
+			t.Errorf("prompt no longer teaches ticket age direction: missing %q", phrase)
+		}
+	}
+}
