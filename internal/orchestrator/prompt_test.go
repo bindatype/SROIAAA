@@ -281,3 +281,49 @@ func rawPromptForTest(t *testing.T) string {
 	}
 	return string(raw)
 }
+
+// TestSafetyRulesCannotBeAblated asserts the rules whose loss would turn an
+// absence of evidence into a reassurance are named in eval_ablate.py's
+// protected list.
+//
+// That protection used to be the absence of an ablation marker. On 2026-09-03
+// eleven rules were marked so their loss could be guarded -- correct in
+// itself -- and four of them were safety rules, so the protection silently
+// ended in the same commit that improved the guarding. A safeguard that holds
+// only while nobody does the obvious thing is not a safeguard.
+//
+// The harness scores against a pegasusdb suite, so for most of these it would
+// report "removal costs nothing" while being structurally incapable of seeing
+// the failure. That is not a null result; it is a wrong one, and it would read
+// as permission to delete the rule that exists because a false all-clear was
+// posted while five critical agents were down.
+func TestSafetyRulesCannotBeAblated(t *testing.T) {
+	raw, err := os.ReadFile("../../scripts/eval_ablate.py")
+	if err != nil {
+		t.Fatalf("read eval_ablate.py: %v", err)
+	}
+	harness := string(raw)
+
+	// Rules that must never be removed on the strength of a score.
+	safety := []string{
+		"grouped-truncation", "unrun-check-not-allclear", "ongoing-not-in-log",
+		"no-cve-source", "lead-with-broken", "counts-from-summary",
+		"rt-metadata-only", "oldruntbl-compressed", "ingestion-lag",
+	}
+	for _, name := range safety {
+		if !strings.Contains(harness, `"`+name+`"`) {
+			t.Errorf("%s is not in the ablation harness's protected list; a run could remove it "+
+				"and report that removal costs nothing", name)
+		}
+	}
+
+	// A protected name that no longer exists in the prompt protects nothing,
+	// and would do it quietly.
+	promptText := rawPromptForTest(t)
+	for _, name := range safety {
+		if !strings.Contains(promptText, "<!-- rule:"+name+" -->") {
+			t.Errorf("%s is protected in the harness but no longer marked in the prompt; "+
+				"the protection now applies to nothing", name)
+		}
+	}
+}
