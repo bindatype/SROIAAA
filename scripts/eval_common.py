@@ -117,8 +117,8 @@ def states_a_number(text, expected, tolerance=0.01):
     return False
 
 
-def ask(binary, model, question, policy=DEFAULT_POLICY, timeout=420):
-    """Run one question and return (answer, proposed_intent, host, seconds)."""
+def run_chat(binary, model, question, policy=DEFAULT_POLICY, timeout=420):
+    """Run one question and return (answer, raw_trace, seconds)."""
     import time
     started = time.time()
     try:
@@ -129,18 +129,44 @@ def ask(binary, model, question, policy=DEFAULT_POLICY, timeout=420):
         answer, trace = proc.stdout.strip(), proc.stderr
     except subprocess.TimeoutExpired:
         answer, trace = "", "TIMEOUT"
-    elapsed = round(time.time() - started, 1)
+    return answer, trace, round(time.time() - started, 1)
 
-    intent, host = "", ""
-    match = re.search(r"intent_proposed (\{.*?\})", trace)
-    if match:
+
+def ask_args(binary, model, question, policy=DEFAULT_POLICY, timeout=420):
+    """Run one question and return (answer, proposed_args_dict, seconds)."""
+    answer, trace, elapsed = run_chat(binary, model, question, policy, timeout)
+    return answer, proposed_args(trace), elapsed
+
+
+def ask(binary, model, question, policy=DEFAULT_POLICY, timeout=420):
+    """Run one question and return (answer, proposed_intent, host, seconds)."""
+    answer, trace, elapsed = run_chat(binary, model, question, policy, timeout)
+
+    args = proposed_args(trace)
+    intent = re.sub(r"[^a-z.]", "", str(args.get("intent", "")).lower())
+    return answer, intent, args.get("host", ""), elapsed
+
+
+def proposed_args(trace):
+    """The tool arguments the model proposed, verbatim, as a dict.
+
+    ask() long returned only the intent and host, which is every field the
+    harnesses of the time compared. The selectors it discarded are where the
+    2026-09-02 failure lived: the model proposed a shape, not a wrong number,
+    and a harness that cannot see `since` and `until` cannot see the defect.
+
+    The last proposal wins. A session may propose several times over its tool
+    calls, and the last one is what produced the answer being graded.
+    """
+    args = {}
+    for match in re.finditer(r"intent_proposed (\{.*?\})", trace):
         try:
-            args = json.loads(match.group(1))
-            intent = re.sub(r"[^a-z.]", "", args.get("intent", "").lower())
-            host = args.get("host", "")
+            parsed = json.loads(match.group(1))
         except json.JSONDecodeError:
-            pass
-    return answer, intent, host, elapsed
+            continue
+        if isinstance(parsed, dict):
+            args = parsed
+    return args
 
 
 def write_report(name, title, lines):

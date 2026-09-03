@@ -2,7 +2,7 @@ GO ?= go
 DIST ?= dist
 BINARY ?= sroiaaa-agent
 
-.PHONY: help install uninstall test check-entrypoints test-rt-live run fmt build-linux-amd64 build-linux-arm64 build-linux-all docker-build docker-up fitness eval-models eval-zabbix eval-pegasus eval-headtohead eval-ablate eval-prompt-ab eval-lead probe netbox-probe
+.PHONY: help install uninstall test check-entrypoints test-rt-live run fmt build-linux-amd64 build-linux-arm64 build-linux-all docker-build docker-up fitness eval-models eval-zabbix eval-pegasus eval-headtohead eval-ablate eval-prompt-ab eval-lead eval-rt-shape probe netbox-probe
 
 # Default target: say what exists. A bare `make` that silently builds one
 # thing tells a newcomer nothing about the other fifteen.
@@ -12,6 +12,7 @@ help:
 	@echo '  make install           put `ask` on your PATH (PREFIX=... to choose where)'
 	@echo '  make check-entrypoints check install, uninstall, and ask startup'
 	@echo '  make test-rt-live      RT invariants against live data (needs RT credentials)'
+	@echo '  make eval-rt-shape     does the model bound a ticket-age question (needs credentials)'
 	@echo '  make fmt               gofmt the tree'
 	@echo ''
 	@echo 'These need:  source ~/.config/sroiaaa/env'
@@ -76,6 +77,17 @@ check-entrypoints:
 # is a question about the model, and needs repetition rather than assertion.
 test-rt-live:
 	$(GO) test -tags rtlive -count=1 -v ./internal/connector/ -run TestRTLive
+
+# Whether the model proposes the right SHAPE for a ticket-age question, read
+# from the trace rather than graded out of prose. Five phrasings that must
+# acquire a bound and three controls that must not: a prompt teaching "reach
+# for until" can overshoot into bounding questions that take no bound, and a
+# suite without controls could only ever report success.
+#
+# Runs its own grader self-test first and refuses to measure a model with a
+# grader it has not checked.
+eval-rt-shape:
+	python3 ./scripts/eval_rt_shape.py
 
 run:
 	$(GO) run ./cmd/sroiaaa-agent
