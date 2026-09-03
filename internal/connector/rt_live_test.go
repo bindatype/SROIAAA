@@ -91,7 +91,7 @@ func rtLiveBound() (string, time.Time) {
 // this project keeps finding: the caller believes it asked a narrower question
 // than it asked, and reads a wide answer as a narrow one.
 func TestRTLiveBoundNarrows(t *testing.T) {
-	rt, _ := rtLiveConnector(t)
+	rt, queues := rtLiveConnector(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
@@ -116,12 +116,40 @@ func TestRTLiveBoundNarrows(t *testing.T) {
 	if older > open {
 		t.Errorf("bounded total %d exceeds unbounded total %d: the bound widened the result", older, open)
 	}
-	if open > 0 && older == open {
-		t.Logf("WARNING: every one of the %d open tickets is older than %d days. Possible, but it is also "+
-			"exactly what an ignored bound looks like -- confirm against RT before believing it", open, rtLiveAgeDays)
-	}
 	if bounded.Until == "" {
 		t.Error("evidence does not record the bound it applied; an unrecorded filter cannot be audited")
+	}
+
+	// Equal counts used to be a warning here. That was the wrong resolution: it
+	// is simultaneously the signature of an honest result (every open ticket
+	// really is old) and of a bound that never reached RT, and a test that
+	// cannot separate those resolves the ambiguity the reassuring way.
+	//
+	// Ask RT how many open tickets are YOUNGER than the bound. That number is
+	// what the bound is supposed to exclude, so it decides the case: if any
+	// exist, the bounded total must be strictly smaller, and RT's own two
+	// halves must sum to its own whole.
+	// Scoped to the same queues as the other two counts. Passing nil here
+	// swept every queue in RT and made the sum check fail on the first live
+	// run: 304 older + 311 newer against 458 open, because "newer" was
+	// counting queues the allowlist excludes.
+	younger, err := rtLiveDirectCount(ctx, queues, bound, "")
+	if err != nil {
+		t.Fatalf("direct RT count of tickets newer than the bound: %v", err)
+	}
+	t.Logf("RT directly: %d open tickets newer than the bound", younger)
+
+	if younger == 0 {
+		t.Skipf("RT has no open tickets newer than %d days, so an applied bound and an ignored one "+
+			"produce identical results and this cannot tell them apart. Not a pass", rtLiveAgeDays)
+	}
+	if older == open {
+		t.Errorf("the bound excluded nothing: %d open, %d older, yet RT reports %d open tickets newer "+
+			"than the bound. The bound is not reaching RT", open, older, younger)
+	}
+	if open != older+younger {
+		t.Errorf("RT's own halves do not sum: %d older + %d newer = %d, but %d open. The two queries "+
+			"are not asking about the same population", older, younger, older+younger, open)
 	}
 }
 
@@ -337,7 +365,7 @@ func TestRTLiveMatchesRTsOwnCount(t *testing.T) {
 	// Sample either side of the connector's own call. Tickets are resolved and
 	// filed while a test runs, and a mismatch inside that drift is movement,
 	// not a defect.
-	before, err := rtLiveDirectCount(ctx, queues, bound)
+	before, err := rtLiveDirectCount(ctx, queues, "", bound)
 	if err != nil {
 		t.Fatalf("direct RT count (before): %v", err)
 	}
@@ -345,7 +373,7 @@ func TestRTLiveMatchesRTsOwnCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bounded search: %v", err)
 	}
-	after, err := rtLiveDirectCount(ctx, queues, bound)
+	after, err := rtLiveDirectCount(ctx, queues, "", bound)
 	if err != nil {
 		t.Fatalf("direct RT count (after): %v", err)
 	}
@@ -363,7 +391,7 @@ func TestRTLiveMatchesRTsOwnCount(t *testing.T) {
 
 // rtLiveDirectCount asks RT the same question over HTTP without going through
 // the connector, reading the envelope's own total rather than counting rows.
-func rtLiveDirectCount(ctx context.Context, queues []string, until string) (int, error) {
+func rtLiveDirectCount(ctx context.Context, queues []string, since, until string) (int, error) {
 	endpoint := strings.TrimRight(os.Getenv(rtLiveEndpointEnv), "/")
 	parts := []string{"(Status = 'new' OR Status = 'open' OR Status = 'stalled')"}
 	queueParts := make([]string, 0, len(queues))
@@ -373,12 +401,17 @@ func rtLiveDirectCount(ctx context.Context, queues []string, until string) (int,
 	if len(queueParts) > 0 {
 		parts = append(parts, "("+strings.Join(queueParts, " OR ")+")")
 	}
-	if until != "" {
-		moment, err := time.Parse(time.RFC3339, until)
+	for _, bound := range []struct{ value, operator string }{{since, ">"}, {until, "<"}} {
+		if bound.value == "" {
+			continue
+		}
+		moment, err := time.Parse(time.RFC3339, bound.value)
 		if err != nil {
 			return 0, err
 		}
-		parts = append(parts, fmt.Sprintf("Created < '%s'", moment.Format("2006-01-02 15:04:05")))
+		// Same literal format the connector's rtDateBound produces, so both
+		// sides are asking RT the same question.
+		parts = append(parts, fmt.Sprintf("Created %s '%s'", bound.operator, moment.Format("2006-01-02 15:04:05")))
 	}
 
 	values := url.Values{}
