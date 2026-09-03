@@ -2,7 +2,7 @@ GO ?= go
 DIST ?= dist
 BINARY ?= sroiaaa-agent
 
-.PHONY: help install uninstall test check-entrypoints run fmt build-linux-amd64 build-linux-arm64 build-linux-all docker-build docker-up fitness eval-models eval-zabbix eval-pegasus eval-headtohead eval-ablate eval-prompt-ab eval-lead probe netbox-probe
+.PHONY: help install uninstall test check-entrypoints test-rt-live run fmt build-linux-amd64 build-linux-arm64 build-linux-all docker-build docker-up fitness eval-models eval-zabbix eval-pegasus eval-headtohead eval-ablate eval-prompt-ab eval-lead probe netbox-probe
 
 # Default target: say what exists. A bare `make` that silently builds one
 # thing tells a newcomer nothing about the other fifteen.
@@ -11,6 +11,7 @@ help:
 	@echo '  make test              unit tests; no credentials, no network'
 	@echo '  make install           put `ask` on your PATH (PREFIX=... to choose where)'
 	@echo '  make check-entrypoints check install, uninstall, and ask startup'
+	@echo '  make test-rt-live      RT invariants against live data (needs RT credentials)'
 	@echo '  make fmt               gofmt the tree'
 	@echo ''
 	@echo 'These need:  source ~/.config/sroiaaa/env'
@@ -59,6 +60,22 @@ test:
 # install, then typing `ask`. Needs no credentials and no network.
 check-entrypoints:
 	@sh ./scripts/check_entrypoints.sh
+
+# Request Tracker invariants against the live instance: that a bound reaches
+# RT, that it filters the side it claims, that a census covers every matching
+# ticket or says why not, that the queue allowlist holds, that no ticket body
+# leaves the connector, and that the total matches RT answering the same
+# question directly.
+#
+# Behind a build tag rather than an environment check, so it cannot join
+# `make test` even on a machine that has credentials sourced. That run stays
+# credential-free and offline; a suite that fails when a service is down
+# teaches people to ignore it.
+#
+# No model is involved. These verify the machinery. Whether an ANSWER improved
+# is a question about the model, and needs repetition rather than assertion.
+test-rt-live:
+	$(GO) test -tags rtlive -count=1 -v ./internal/connector/ -run TestRTLive
 
 run:
 	$(GO) run ./cmd/sroiaaa-agent

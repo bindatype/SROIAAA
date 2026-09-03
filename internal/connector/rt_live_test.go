@@ -1,0 +1,361 @@
+//go:build rtlive
+
+// Live Request Tracker invariants. Excluded from the default build by the
+// rtlive tag, deliberately: `go test ./...` must stay credential-free and must
+// not reach the network, or it starts failing when a service is down and
+// people learn to ignore a red suite.
+//
+//	make test-rt-live
+//
+// These assert the machinery, with no model involved. They cannot tell you
+// whether an answer improved -- that question is about the model, which is the
+// one nondeterministic part -- but they catch what the model-facing evaluation
+// structurally cannot see: a bound that never reaches RT, a queue allowlist
+// not applied, a census that silently undercounts, ticket content leaking into
+// evidence.
+package connector
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/maclach/sroiaaa/internal/broker"
+)
+
+const (
+	rtLiveEndpointEnv = "SROIAAA_RT_ENDPOINT"
+	rtLiveTokenEnv    = "RT_API_TOKEN"
+	rtLiveQueuesEnv   = "SROIAAA_RT_QUEUES"
+
+	// rtLiveAgeDays is the bound these tests reason about. Ticket age is
+	// stable in a way "open right now" is not: a ticket 61 days old stays 61
+	// days old for the duration of a run.
+	rtLiveAgeDays = 60
+)
+
+// rtLiveConnector builds a connector from the environment, or fails with the
+// name of whatever is missing. A skip here would be wrong: this file only runs
+// when someone asked for it by tag, and silently passing on no credentials is
+// how a suite comes to prove nothing.
+func rtLiveConnector(t *testing.T) (*RTConnector, []string) {
+	t.Helper()
+	endpoint, token := os.Getenv(rtLiveEndpointEnv), os.Getenv(rtLiveTokenEnv)
+	queues := splitLive(os.Getenv(rtLiveQueuesEnv))
+	for name, value := range map[string]string{
+		rtLiveEndpointEnv: endpoint,
+		rtLiveTokenEnv:    token,
+		rtLiveQueuesEnv:   os.Getenv(rtLiveQueuesEnv),
+	} {
+		if strings.TrimSpace(value) == "" {
+			t.Fatalf("%s is not set (and must be exported); these tests reach live RT by design", name)
+		}
+	}
+	rt, err := NewRTConnector(RTConfig{Endpoint: endpoint, Token: token, Queues: queues})
+	if err != nil {
+		t.Fatalf("build RT connector: %v", err)
+	}
+	return rt, queues
+}
+
+func splitLive(value string) []string {
+	var out []string
+	for _, part := range strings.Split(value, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func rtLiveStep(until string) broker.RouteStep {
+	return broker.RouteStep{Source: broker.SourceRequestTracker, Action: "tickets.search", Limit: 100, Until: until}
+}
+
+// rtLiveBound is the same relative window the broker would resolve, resolved
+// here so the test and the connector are talking about one instant.
+func rtLiveBound() (string, time.Time) {
+	moment := time.Now().UTC().Add(-rtLiveAgeDays * 24 * time.Hour)
+	return moment.Format(time.RFC3339), moment
+}
+
+// TestRTLiveBoundNarrows asserts a bound reaches RT rather than being accepted
+// and dropped. An until that changes nothing is the silent-selector failure
+// this project keeps finding: the caller believes it asked a narrower question
+// than it asked, and reads a wide answer as a narrow one.
+func TestRTLiveBoundNarrows(t *testing.T) {
+	rt, _ := rtLiveConnector(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	unbounded, err := rt.Execute(ctx, rtLiveStep(""))
+	if err != nil {
+		t.Fatalf("unbounded search: %v", err)
+	}
+	bound, _ := rtLiveBound()
+	bounded, err := rt.Execute(ctx, rtLiveStep(bound))
+	if err != nil {
+		t.Fatalf("bounded search: %v", err)
+	}
+
+	open, older := unbounded.Summary["total_matching"], bounded.Summary["total_matching"]
+	t.Logf("open now: %d; older than %d days: %d", open, rtLiveAgeDays, older)
+
+	if older > open {
+		t.Errorf("bounded total %d exceeds unbounded total %d: the bound widened the result", older, open)
+	}
+	if open > 0 && older == open {
+		t.Logf("WARNING: every one of the %d open tickets is older than %d days. Possible, but it is also "+
+			"exactly what an ignored bound looks like -- confirm against RT before believing it", open, rtLiveAgeDays)
+	}
+	if bounded.Until == "" {
+		t.Error("evidence does not record the bound it applied; an unrecorded filter cannot be audited")
+	}
+}
+
+// TestRTLiveBoundIsTheRightSide catches a direction inversion in the
+// connector. "Older than 60 days" must return tickets created BEFORE that
+// moment. Inverted, it answers the opposite question and the prose reads
+// perfectly plausible either way.
+func TestRTLiveBoundIsTheRightSide(t *testing.T) {
+	rt, _ := rtLiveConnector(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	bound, moment := rtLiveBound()
+	evidence, err := rt.Execute(ctx, rtLiveStep(bound))
+	if err != nil {
+		t.Fatalf("bounded search: %v", err)
+	}
+	if len(evidence.Items) == 0 {
+		t.Skipf("no tickets older than %d days; nothing to check the direction against", rtLiveAgeDays)
+	}
+
+	for _, item := range evidence.Items {
+		raw := item.Fields["created"]
+		created, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			// RT's own date rendering, not ours. Report rather than fail: a
+			// format this cannot read is worth knowing about but is not
+			// evidence the bound is wrong.
+			t.Logf("ticket %s: unparseable created %q (%v)", item.ID, raw, err)
+			continue
+		}
+		if created.After(moment) {
+			t.Errorf("ticket %s was created %s, after the %s bound: the filter is inverted",
+				item.ID, created.Format(time.RFC3339), moment.Format(time.RFC3339))
+		}
+	}
+}
+
+// TestRTLiveCensusAccountsForEveryTicket asserts the owner breakdown is a
+// census over every matching ticket rather than a tally of the returned page.
+// A breakdown that silently covers less than the total is the failure the
+// answer on 2026-09-02 actually made -- 100 rows of 428 reported as a property
+// of RT -- and here it must be either complete or warned about.
+func TestRTLiveCensusAccountsForEveryTicket(t *testing.T) {
+	rt, _ := rtLiveConnector(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	bound, _ := rtLiveBound()
+	evidence, err := rt.Execute(ctx, rtLiveStep(bound))
+	if err != nil {
+		t.Fatalf("bounded search: %v", err)
+	}
+	total := evidence.Summary["total_matching"]
+	if total == 0 {
+		t.Skipf("no tickets older than %d days", rtLiveAgeDays)
+	}
+
+	for _, name := range []string{"tickets_by_owner", "tickets_by_queue"} {
+		breakdown, ok := evidence.Breakdown[name]
+		if !ok {
+			if !hasWarningAbout(evidence.Warnings, name) {
+				t.Errorf("%s is absent with no warning saying why; a count that was never computed is not zero", name)
+			}
+			continue
+		}
+		sum := 0
+		for _, count := range breakdown {
+			sum += count
+		}
+		if sum == total {
+			continue
+		}
+		if !hasWarningAbout(evidence.Warnings, name) {
+			t.Errorf("%s sums to %d of %d matching tickets and says nothing about the gap", name, sum, total)
+		}
+		if sum > total {
+			t.Errorf("%s sums to %d, more than the %d matching tickets: tickets are being counted twice", name, sum, total)
+		}
+	}
+}
+
+func hasWarningAbout(warnings []string, name string) bool {
+	for _, warning := range warnings {
+		if strings.Contains(warning, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestRTLiveHonoursTheQueueAllowlist asserts no ticket arrives from a queue
+// nobody allowlisted. The allowlist is the whole reason the connector refuses
+// to construct without one.
+func TestRTLiveHonoursTheQueueAllowlist(t *testing.T) {
+	rt, queues := rtLiveConnector(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	evidence, err := rt.Execute(ctx, rtLiveStep(""))
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	allowed := make(map[string]bool, len(queues))
+	for _, queue := range queues {
+		allowed[queue] = true
+	}
+	for _, item := range evidence.Items {
+		if queue := item.Fields["queue"]; queue != "" && !allowed[queue] {
+			t.Errorf("ticket %s came from queue %q, which is not in %s", item.ID, queue, rtLiveQueuesEnv)
+		}
+	}
+	if breakdown, ok := evidence.Breakdown["tickets_by_queue"]; ok {
+		for queue := range breakdown {
+			if !allowed[queue] {
+				t.Errorf("tickets_by_queue names queue %q, which is not in %s", queue, rtLiveQueuesEnv)
+			}
+		}
+	}
+}
+
+// TestRTLiveCarriesNoTicketContent asserts the sensitivity boundary against
+// live data rather than against a fixture written to respect it. RT tickets
+// are human correspondence and routinely contain user PII and credentials
+// pasted into a support request; evidence is metadata only.
+func TestRTLiveCarriesNoTicketContent(t *testing.T) {
+	rt, _ := rtLiveConnector(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	evidence, err := rt.Execute(ctx, rtLiveStep(""))
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	allowed := map[string]bool{"queue": true, "owner": true, "created": true, "last_updated": true, "status": true}
+	for _, item := range evidence.Items {
+		for field := range item.Fields {
+			if !allowed[field] {
+				t.Errorf("ticket %s carries field %q, which is not metadata this connector is allowed to return", item.ID, field)
+			}
+		}
+	}
+
+	// Serialize the whole thing: a field named innocuously elsewhere in the
+	// structure would not be caught by the loop above.
+	encoded, err := json.Marshal(evidence)
+	if err != nil {
+		t.Fatalf("marshal evidence: %v", err)
+	}
+	for _, forbidden := range []string{`"Content"`, `"content"`, `"Transactions"`, `"correspondence"`} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Errorf("evidence contains %s; ticket bodies must never leave the connector", forbidden)
+		}
+	}
+}
+
+// TestRTLiveMatchesRTsOwnCount compares the connector's total against RT
+// answering the same question directly. Ground truth drawn back through the
+// connector would confirm the code against itself.
+func TestRTLiveMatchesRTsOwnCount(t *testing.T) {
+	rt, queues := rtLiveConnector(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	bound, _ := rtLiveBound()
+
+	// Sample either side of the connector's own call. Tickets are resolved and
+	// filed while a test runs, and a mismatch inside that drift is movement,
+	// not a defect.
+	before, err := rtLiveDirectCount(ctx, queues, bound)
+	if err != nil {
+		t.Fatalf("direct RT count (before): %v", err)
+	}
+	evidence, err := rt.Execute(ctx, rtLiveStep(bound))
+	if err != nil {
+		t.Fatalf("bounded search: %v", err)
+	}
+	after, err := rtLiveDirectCount(ctx, queues, bound)
+	if err != nil {
+		t.Fatalf("direct RT count (after): %v", err)
+	}
+
+	got := evidence.Summary["total_matching"]
+	low, high := before, after
+	if low > high {
+		low, high = high, low
+	}
+	t.Logf("RT directly: %d before, %d after; connector reported %d", before, after, got)
+	if got < low || got > high {
+		t.Errorf("connector reported %d, outside RT's own %d..%d for the same query", got, low, high)
+	}
+}
+
+// rtLiveDirectCount asks RT the same question over HTTP without going through
+// the connector, reading the envelope's own total rather than counting rows.
+func rtLiveDirectCount(ctx context.Context, queues []string, until string) (int, error) {
+	endpoint := strings.TrimRight(os.Getenv(rtLiveEndpointEnv), "/")
+	parts := []string{"(Status = 'new' OR Status = 'open' OR Status = 'stalled')"}
+	queueParts := make([]string, 0, len(queues))
+	for _, queue := range queues {
+		queueParts = append(queueParts, fmt.Sprintf("Queue = '%s'", strings.ReplaceAll(queue, "'", "\\'")))
+	}
+	if len(queueParts) > 0 {
+		parts = append(parts, "("+strings.Join(queueParts, " OR ")+")")
+	}
+	if until != "" {
+		moment, err := time.Parse(time.RFC3339, until)
+		if err != nil {
+			return 0, err
+		}
+		parts = append(parts, fmt.Sprintf("Created < '%s'", moment.Format("2006-01-02 15:04:05")))
+	}
+
+	values := url.Values{}
+	values.Set("query", strings.Join(parts, " AND "))
+	values.Set("per_page", "1")
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/REST/2.0/tickets?"+values.Encode(), nil)
+	if err != nil {
+		return 0, err
+	}
+	request.Header.Set("Authorization", "token "+os.Getenv(rtLiveTokenEnv))
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return 0, err
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return 0, err
+	}
+	if response.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("rt returned HTTP %d", response.StatusCode)
+	}
+	var envelope struct {
+		Total int `json:"total"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return 0, err
+	}
+	return envelope.Total, nil
+}
