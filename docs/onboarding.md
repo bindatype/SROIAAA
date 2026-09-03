@@ -89,6 +89,16 @@ export SROIAAA_RT_ENDPOINT=https://rt.example.edu
 export RT_API_TOKEN=...
 export SROIAAA_RT_QUEUES=Ops,Helpdesk
 
+# Endpoint agents: policy host -> one HTTPS endpoint and its own bearer token.
+# Keep this in the sourced private env file, never in broker policy or a shell
+# flag. HTTP is accepted only for a loopback development agent.
+export SROIAAA_AGENT_CONFIG='{
+  "sgtstubby.arc.gwu.edu": {
+    "endpoint": "https://sgtstubby.arc.gwu.edu:8443",
+    "token": "..."
+  }
+}'
+
 # NetBox: source of truth for what a device is, where it lives, and what
 # address it holds. No connector yet -- these are read by bin/netbox-probe.sh,
 # which is the reconnaissance step that comes before one.

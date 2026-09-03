@@ -33,6 +33,7 @@ const (
 	auditPathEnv           = "SROIAAA_BROKER_AUDIT"
 	rtEndpointEnv          = "SROIAAA_RT_ENDPOINT"
 	rtTokenEnv             = "RT_API_TOKEN"
+	sroiaaaAgentConfigEnv  = "SROIAAA_AGENT_CONFIG"
 	// rtQueuesEnv names the RT queues this deployment allows searching, as a
 	// comma-separated list. Site configuration, not a connector default: RT
 	// queues are organization-specific and there is no safe default that
@@ -242,8 +243,19 @@ func buildSession(policyPath, model, endpoint, zabbixEndpoint, wazuhEndpoint, rt
 		}
 		connectors = append(connectors, rt)
 	}
+	if rawAgents := os.Getenv(sroiaaaAgentConfigEnv); rawAgents != "" {
+		agents, err := connector.ParseSROIAAAAgents(rawAgents)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", sroiaaaAgentConfigEnv, err)
+		}
+		agentConnector, err := connector.NewSROIAAAConnector(connector.SROIAAAConfig{Agents: agents})
+		if err != nil {
+			return nil, err
+		}
+		connectors = append(connectors, agentConnector)
+	}
 	if len(connectors) == 0 {
-		return nil, fmt.Errorf("no connectors configured; set Zabbix and/or Wazuh endpoints and credentials")
+		return nil, fmt.Errorf("no connectors configured; set a source endpoint and its credentials")
 	}
 
 	// Name what is switched off. An intent whose connector does not exist is
@@ -319,6 +331,9 @@ func unconfiguredSources(zabbixEndpoint, wazuhEndpoint, rtEndpoint string) []str
 	}
 	if rtEndpoint == "" {
 		off = append(off, "Request Tracker tickets (set "+rtEndpointEnv+", "+rtTokenEnv+", "+rtQueuesEnv+")")
+	}
+	if os.Getenv(sroiaaaAgentConfigEnv) == "" {
+		off = append(off, "endpoint evidence (set "+sroiaaaAgentConfigEnv+")")
 	}
 	return off
 }

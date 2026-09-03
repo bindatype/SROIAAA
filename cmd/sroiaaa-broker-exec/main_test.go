@@ -198,7 +198,7 @@ func TestBothPathsReadTheSameWazuhConfiguration(t *testing.T) {
 		t.Fatalf("read sroiaaa-chat source: %v", err)
 	}
 	for _, name := range []string{
-		"SROIAAA_WAZUH_CRITICAL_GROUPS", "SROIAAA_RT_QUEUES", "RT_API_TOKEN", "SROIAAA_RT_ENDPOINT",
+		"SROIAAA_WAZUH_CRITICAL_GROUPS", "SROIAAA_RT_QUEUES", "RT_API_TOKEN", "SROIAAA_RT_ENDPOINT", "SROIAAA_AGENT_CONFIG",
 	} {
 		if strings.Contains(string(chat), name) != strings.Contains(string(source), name) {
 			t.Errorf("%s is read by one execution path and not the other", name)
@@ -220,6 +220,23 @@ func TestRTQueueAllowlistNamesItsVariable(t *testing.T) {
 		t.Fatal("an empty queue allowlist must be refused")
 	}
 	if !strings.Contains(err.Error(), rtQueuesEnv) {
+		t.Errorf("the refusal must name the variable that fixes it; got %q", err)
+	}
+}
+
+func TestEndpointAgentConfigNamesItsVariable(t *testing.T) {
+	t.Setenv(sroiaaaAgentConfigEnv, "")
+	plan := planFor(t, broker.RouteRequest{
+		Intent:   broker.IntentLiveEvidence,
+		Host:     "docker-harness",
+		Resource: "system-log",
+	})
+
+	_, err := buildConnectors(plan, connectorOptions{})
+	if err == nil {
+		t.Fatal("a live-evidence plan without endpoint configuration was accepted")
+	}
+	if !strings.Contains(err.Error(), sroiaaaAgentConfigEnv) {
 		t.Errorf("the refusal must name the variable that fixes it; got %q", err)
 	}
 }

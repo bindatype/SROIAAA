@@ -339,7 +339,7 @@ These intents, and nothing else:
 | one agent's state, by exact name | `agent.status` | Wazuh API |
 | active problem triggers, optionally per host | `monitoring.problems` | Zabbix API |
 | what happened during a past window | `monitoring.history` | Zabbix API (event log) |
-| a policy-approved file from an endpoint | `live.evidence` | SROIAAA agent (not yet built) |
+| a policy-approved file from an endpoint | `live.evidence` | SROIAAA endpoint agent |
 | aggregate/ad hoc HPC accounting questions | `database.query` | PegasusDB (one read-only `SELECT`) |
 | open tickets in allowlisted queues | `tickets.open` | Request Tracker REST 2.0 |
 | open tickets mentioning a host, by subject | `tickets.for_host` | Request Tracker REST 2.0 |
@@ -357,10 +357,23 @@ and dates. Ticket content and transaction history are never fetched; see
 "How sensitive is the content?" in
 [docs/adding-a-connector.md](docs/adding-a-connector.md).
 
-Only intents whose connector exists are offered to the model. There is no
-SROIAAA endpoint connector yet, so `live.evidence` is planned and
-authorized by the broker but withheld from the model-facing tool schema
-until it can execute.
+Only intents whose connector is configured are offered to the model. Endpoint
+evidence is enabled by `SROIAAA_AGENT_CONFIG`, a host-to-agent map held in the
+operator environment, never in a route plan. Each host has its own endpoint
+and bearer token, and remote agents must use HTTPS:
+
+```bash
+export SROIAAA_AGENT_CONFIG='{
+  "sgtstubby.arc.gwu.edu": {
+    "endpoint": "https://sgtstubby.arc.gwu.edu:8443",
+    "token": "the-read-only-agent-token-for-sgtstubby"
+  }
+}'
+```
+
+`http://` is accepted only for a loopback development agent. The connector
+does not follow redirects, so an agent cannot redirect its bearer token to a
+different destination.
 
 There is **no** source for vulnerabilities or CVEs, installed packages,
 patch level, log contents, user accounts, configuration, or performance

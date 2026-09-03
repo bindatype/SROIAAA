@@ -24,6 +24,7 @@ func clearEnv(t *testing.T) {
 		zabbixEndpointEnv, zabbixTokenEnv,
 		wazuhEndpointEnv, wazuhUsernameEnv, wazuhPasswordEnv, wazuhCriticalGroupsEnv,
 		pegasusDSNEnv, pegasusMaxRowsEnv, pegasusMaxBytesEnv, auditPathEnv,
+		rtEndpointEnv, rtTokenEnv, rtQueuesEnv, sroiaaaAgentConfigEnv,
 	} {
 		t.Setenv(name, "")
 	}
@@ -204,11 +205,13 @@ func TestHalfConfiguredSourceIsRefused(t *testing.T) {
 // broken unless something says so.
 func TestUnconfiguredSourcesNameTheirVariables(t *testing.T) {
 	t.Setenv(pegasusDSNEnv, "")
+	t.Setenv(sroiaaaAgentConfigEnv, "")
 	off := strings.Join(unconfiguredSources("", "", ""), "; ")
 
 	for _, name := range []string{
 		zabbixEndpointEnv, wazuhEndpointEnv, pegasusDSNEnv,
 		rtEndpointEnv, rtTokenEnv, rtQueuesEnv,
+		sroiaaaAgentConfigEnv,
 	} {
 		if !strings.Contains(off, name) {
 			t.Errorf("the note does not name %s, so nobody learns to set it: %q", name, off)
@@ -219,4 +222,32 @@ func TestUnconfiguredSourcesNameTheirVariables(t *testing.T) {
 	if got := unconfiguredSources("https://zabbix.example.edu", "", ""); strings.Contains(strings.Join(got, "; "), zabbixEndpointEnv) {
 		t.Errorf("a configured source was reported unconfigured: %q", got)
 	}
+}
+
+func TestEndpointAgentConfigurationOffersLiveEvidence(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(mindrouterKeyEnv, "test-key")
+	t.Setenv(sroiaaaAgentConfigEnv, `{
+		"docker-harness": {
+			"endpoint": "http://127.0.0.1:18081",
+			"token": "agent-token"
+		}
+	}`)
+
+	session, err := buildSession(examplePolicy(t), "test-model", "http://localhost:8000", "", "", "", false)
+	if err != nil {
+		t.Fatalf("buildSession() error = %v", err)
+	}
+	if !contains(session.Intents(), "live.evidence") {
+		t.Errorf("intents = %q, want live.evidence when an agent is configured", session.Intents())
+	}
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

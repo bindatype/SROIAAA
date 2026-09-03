@@ -26,6 +26,10 @@ const (
 	pegasusMaxBytesEnv = "SROIAAA_PEGASUS_MAX_BYTES"
 	rtEndpointEnv      = "SROIAAA_RT_ENDPOINT"
 	rtTokenEnv         = "RT_API_TOKEN"
+	// sroiaaaAgentConfigEnv is a JSON host map. Each entry contains the one
+	// endpoint and bearer token approved for that policy host; plans never
+	// carry either value.
+	sroiaaaAgentConfigEnv = "SROIAAA_AGENT_CONFIG"
 	// rtQueuesEnv names the RT queues this deployment allows searching, as a
 	// comma-separated list. Site configuration, so it lives here rather than
 	// in the connector: RT queues are organization-specific and there is no
@@ -254,9 +258,21 @@ func buildConnectors(plan broker.RoutePlan, options connectorOptions) ([]connect
 		built = append(built, rt)
 	}
 
+	if needed[broker.SourceSROIAAA] {
+		agents, err := connector.ParseSROIAAAAgents(os.Getenv(sroiaaaAgentConfigEnv))
+		if err != nil {
+			return nil, fmt.Errorf("plan needs an endpoint agent: set %s: %w", sroiaaaAgentConfigEnv, err)
+		}
+		agentConnector, err := connector.NewSROIAAAConnector(connector.SROIAAAConfig{Agents: agents})
+		if err != nil {
+			return nil, err
+		}
+		built = append(built, agentConnector)
+	}
+
 	for source := range needed {
 		switch source {
-		case broker.SourceZabbixAPI, broker.SourceWazuhAPI, broker.SourcePegasusDB, broker.SourceRequestTracker:
+		case broker.SourceZabbixAPI, broker.SourceWazuhAPI, broker.SourcePegasusDB, broker.SourceRequestTracker, broker.SourceSROIAAA:
 		default:
 			return nil, fmt.Errorf("no connector implemented for source %q", source)
 		}

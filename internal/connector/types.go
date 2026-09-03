@@ -73,7 +73,12 @@ type Evidence struct {
 	// and how many each", and that is a table code can compute exactly.
 	Breakdown map[string]map[string]int `json:"breakdown,omitempty"`
 	Truncated bool                      `json:"truncated"`
-	Items     []EvidenceItem            `json:"items"`
+	// Data carries a policy-approved endpoint-agent result whose shape depends
+	// on the fixed operation. Unlike the vendor connectors, the agent already
+	// returns bounded, normalized JSON; re-encoding it into synthetic rows
+	// would obscure the path, content, or list entries an operator asked for.
+	Data  any            `json:"data,omitempty"`
+	Items []EvidenceItem `json:"items"`
 }
 
 // EvidenceItem is one normalized record. Connectors map source-specific
