@@ -174,6 +174,33 @@ func buildSession(policyPath, model, endpoint, zabbixEndpoint, wazuhEndpoint, rt
 	// Every connector the model could reach is built up front, because the
 	// intent it will propose is not known until it proposes one.
 	var connectors []connector.Connector
+
+	// A source configured halfway is a mistake, not a choice: nobody sets an
+	// endpoint meaning to leave the credential out. Refusing here names the
+	// variable. Skipping silently withholds the intent from the tool schema
+	// instead, and the model then reports the source as "unavailable" -- which
+	// reads as an outage rather than an unset variable. That cost an afternoon
+	// on 2026-09-02, chasing RT through a pull, a rebuild and a merge before
+	// anyone looked at the env file.
+	for _, half := range []struct{ endpoint, endpointEnv, credential, credentialEnv string }{
+		{zabbixEndpoint, zabbixEndpointEnv, os.Getenv(zabbixTokenEnv), zabbixTokenEnv},
+		{wazuhEndpoint, wazuhEndpointEnv, os.Getenv(wazuhUsernameEnv), wazuhUsernameEnv},
+		{wazuhEndpoint, wazuhEndpointEnv, os.Getenv(wazuhPasswordEnv), wazuhPasswordEnv},
+		{rtEndpoint, rtEndpointEnv, os.Getenv(rtTokenEnv), rtTokenEnv},
+	} {
+		if half.endpoint != "" && half.credential == "" {
+			return nil, fmt.Errorf("%s is set but %s is not; export it, or unset %s to disable that source deliberately",
+				half.endpointEnv, half.credentialEnv, half.endpointEnv)
+		}
+	}
+
+	// The queue allowlist is the third RT variable and the easiest to miss.
+	// The connector refuses an empty one, correctly, but it is a library and
+	// cannot name the variable that would fix it.
+	if rtEndpoint != "" && len(splitList(os.Getenv(rtQueuesEnv))) == 0 {
+		return nil, fmt.Errorf("%s is set but %s is not; there is no safe default queue set, "+
+			"so RT is refused rather than searched in full", rtEndpointEnv, rtQueuesEnv)
+	}
 	if zabbixEndpoint != "" && os.Getenv(zabbixTokenEnv) != "" {
 		zabbix, err := connector.NewZabbixConnector(connector.ZabbixConfig{
 			Endpoint: zabbixEndpoint,
@@ -217,6 +244,13 @@ func buildSession(policyPath, model, endpoint, zabbixEndpoint, wazuhEndpoint, rt
 	}
 	if len(connectors) == 0 {
 		return nil, fmt.Errorf("no connectors configured; set Zabbix and/or Wazuh endpoints and credentials")
+	}
+
+	// Name what is switched off. An intent whose connector does not exist is
+	// withheld from the model, and "I cannot answer that" is indistinguishable
+	// from a source that is down. One line on stderr is the difference.
+	if off := unconfiguredSources(zabbixEndpoint, wazuhEndpoint, rtEndpoint); len(off) > 0 {
+		fmt.Fprintf(os.Stderr, "note: not configured, so their questions will be refused: %s\n", strings.Join(off, "; "))
 	}
 
 	executor, err := connector.NewExecutor(connectors...)
@@ -266,4 +300,25 @@ func splitList(value string) []string {
 		}
 	}
 	return out
+}
+
+// unconfiguredSources lists the evidence sources that are switched off, each
+// with the variables that would switch it on. It reports only sources that are
+// entirely absent; a half-configured one is an error raised in buildSession
+// rather than a note here.
+func unconfiguredSources(zabbixEndpoint, wazuhEndpoint, rtEndpoint string) []string {
+	var off []string
+	if zabbixEndpoint == "" {
+		off = append(off, "Zabbix monitoring (set "+zabbixEndpointEnv+", "+zabbixTokenEnv+")")
+	}
+	if wazuhEndpoint == "" {
+		off = append(off, "Wazuh fleet (set "+wazuhEndpointEnv+", "+wazuhUsernameEnv+", "+wazuhPasswordEnv+")")
+	}
+	if os.Getenv(pegasusDSNEnv) == "" {
+		off = append(off, "PegasusDB accounting (set "+pegasusDSNEnv+")")
+	}
+	if rtEndpoint == "" {
+		off = append(off, "Request Tracker tickets (set "+rtEndpointEnv+", "+rtTokenEnv+", "+rtQueuesEnv+")")
+	}
+	return off
 }

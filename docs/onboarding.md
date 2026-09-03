@@ -80,6 +80,15 @@ export SROIAAA_WAZUH_CRITICAL_GROUPS=RTS_Ops,Viper
 # Scheduler accounting. Needed by eval-pegasus and the morning digest.
 export SROIAAA_PEGASUS_DSN='readonly:PASSWORD@tcp(db.example.edu:3306)/pegasusdb?timeout=10s&readTimeout=30s&parseTime=false'
 
+# Request Tracker tickets. Metadata only -- subject, queue, status, owner and
+# dates, never ticket bodies. SROIAAA_RT_QUEUES is a required allowlist: unset,
+# the connector refuses to construct rather than searching every queue, so
+# tickets.open and tickets.for_host are withheld from the model entirely and it
+# will report RT as unavailable.
+export SROIAAA_RT_ENDPOINT=https://rt.example.edu
+export RT_API_TOKEN=...
+export SROIAAA_RT_QUEUES=Ops,Helpdesk
+
 # NetBox: source of truth for what a device is, where it lives, and what
 # address it holds. No connector yet -- these are read by bin/netbox-probe.sh,
 # which is the reconnaissance step that comes before one.
@@ -191,6 +200,7 @@ run.
 |---|---|
 | `missing environment: ...` | The env file is not sourced in *this* shell, or a line lacks `export`. Sourcing does not survive a new terminal. |
 | Zabbix or Wazuh "connector error" | Usually a missing credential rather than a broken service. Check the variable exists: `printenv ZABBIX_RO_TOKEN \| wc -c`. |
+| The model says a source is "unavailable" or "not covered" | Almost always an unset variable, not an outage. An intent whose connector is not configured is withheld from the model, which cannot tell the difference. `ask` prints a `note:` line on stderr naming every source that is off and the variables that turn it on -- read that first. |
 | NetBox `http=000` | Not a bad token — nothing was sent. Either TLS (the chain is incomplete without `SROIAAA_NETBOX_CACERT`) or IPv6 (the AAAA record does not route; `curl -4` proves it). `bin/netbox-probe.sh reach` needs no token and separates the two. |
 | `make: *** No rule to make target` | You are not in the repository root. |
 | An answer that is confidently wrong | Expected, and the point of the probe suite. Record it. Most rules in the prompt exist because of one of these. |

@@ -176,3 +176,50 @@ func TestRunRejectsBadInvocations(t *testing.T) {
 		})
 	}
 }
+
+// TestBothPathsReadTheSameWazuhConfiguration pins a divergence found on
+// 2026-09-02. sroiaaa-chat read SROIAAA_WAZUH_CRITICAL_GROUPS and this path
+// did not, so the same plan against the same environment produced evidence
+// that could not say whether a critical agent was affected -- and the
+// connector's own warning ("critical group membership was NOT evaluated")
+// made it look like a deliberate deployment choice rather than a path
+// difference. The README presents these two as the same route.
+func TestBothPathsReadTheSameWazuhConfiguration(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read own source: %v", err)
+	}
+	if !strings.Contains(string(source), "CriticalGroups:") {
+		t.Error("this path no longer passes CriticalGroups; a plan run here will differ from the same plan run by sroiaaa-chat")
+	}
+
+	chat, err := os.ReadFile("../sroiaaa-chat/main.go")
+	if err != nil {
+		t.Fatalf("read sroiaaa-chat source: %v", err)
+	}
+	for _, name := range []string{
+		"SROIAAA_WAZUH_CRITICAL_GROUPS", "SROIAAA_RT_QUEUES", "RT_API_TOKEN", "SROIAAA_RT_ENDPOINT",
+	} {
+		if strings.Contains(string(chat), name) != strings.Contains(string(source), name) {
+			t.Errorf("%s is read by one execution path and not the other", name)
+		}
+	}
+}
+
+// TestRTQueueAllowlistNamesItsVariable asserts that a missing queue allowlist
+// is refused with the name of the variable that fixes it. The connector
+// refuses correctly on its own, but it is a library: its message cannot
+// mention an environment variable it does not know exists.
+func TestRTQueueAllowlistNamesItsVariable(t *testing.T) {
+	t.Setenv(rtTokenEnv, "token")
+	t.Setenv(rtQueuesEnv, "")
+
+	plan := broker.RoutePlan{Steps: []broker.RouteStep{{Source: broker.SourceRequestTracker, Action: "tickets.search"}}}
+	_, err := buildConnectors(plan, connectorOptions{rtEndpoint: "https://rt.example.edu"})
+	if err == nil {
+		t.Fatal("an empty queue allowlist must be refused")
+	}
+	if !strings.Contains(err.Error(), rtQueuesEnv) {
+		t.Errorf("the refusal must name the variable that fixes it; got %q", err)
+	}
+}

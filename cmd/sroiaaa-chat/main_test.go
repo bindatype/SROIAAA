@@ -175,3 +175,48 @@ func TestPegasusCapOverrides(t *testing.T) {
 		})
 	}
 }
+
+// TestHalfConfiguredSourceIsRefused pins the failure that cost an afternoon on
+// 2026-09-02. RT was compiled in and unconfigured; the connector was skipped
+// without a word, the intent was withheld from the tool schema, and the model
+// reported RT as "currently unavailable" -- which reads as an outage. The
+// cause was three unset environment variables.
+//
+// An endpoint set without its credential is not a choice to disable a source.
+// It is a mistake, and it now names the variable.
+func TestHalfConfiguredSourceIsRefused(t *testing.T) {
+	t.Setenv(mindrouterKeyEnv, "test-key")
+	t.Setenv(rtTokenEnv, "")
+
+	_, err := buildSession("../../configs/broker-policy.example.json", "m", "http://localhost:8000",
+		"", "", "https://rt.example.edu", false)
+	if err == nil {
+		t.Fatal("an RT endpoint with no token must be refused, not silently skipped")
+	}
+	if !strings.Contains(err.Error(), rtTokenEnv) {
+		t.Errorf("the error must name the missing variable; got %q", err)
+	}
+}
+
+// TestUnconfiguredSourcesNameTheirVariables asserts the note that would have
+// answered the question immediately: which sources are off, and what turns
+// them on. A source that is absent is indistinguishable from one that is
+// broken unless something says so.
+func TestUnconfiguredSourcesNameTheirVariables(t *testing.T) {
+	t.Setenv(pegasusDSNEnv, "")
+	off := strings.Join(unconfiguredSources("", "", ""), "; ")
+
+	for _, name := range []string{
+		zabbixEndpointEnv, wazuhEndpointEnv, pegasusDSNEnv,
+		rtEndpointEnv, rtTokenEnv, rtQueuesEnv,
+	} {
+		if !strings.Contains(off, name) {
+			t.Errorf("the note does not name %s, so nobody learns to set it: %q", name, off)
+		}
+	}
+
+	// A configured source must not be reported as off.
+	if got := unconfiguredSources("https://zabbix.example.edu", "", ""); strings.Contains(strings.Join(got, "; "), zabbixEndpointEnv) {
+		t.Errorf("a configured source was reported unconfigured: %q", got)
+	}
+}

@@ -31,6 +31,12 @@ const (
 	// in the connector: RT queues are organization-specific and there is no
 	// safe default that includes any of them.
 	rtQueuesEnv = "SROIAAA_RT_QUEUES"
+	// wazuhCriticalGroupsEnv names the agent groups whose loss is escalated.
+	// sroiaaa-chat has always read it; this path did not, so the same plan
+	// against the same environment produced evidence that could not say
+	// whether a critical agent was affected. Two paths the README calls
+	// equivalent must read the same configuration.
+	wazuhCriticalGroupsEnv = "SROIAAA_WAZUH_CRITICAL_GROUPS"
 )
 
 func main() {
@@ -201,6 +207,7 @@ func buildConnectors(plan broker.RoutePlan, options connectorOptions) ([]connect
 			Username:           username,
 			Password:           password,
 			InsecureSkipVerify: options.wazuhInsecure,
+			CriticalGroups:     splitList(os.Getenv(wazuhCriticalGroupsEnv)),
 		})
 		if err != nil {
 			return nil, err
@@ -228,10 +235,18 @@ func buildConnectors(plan broker.RoutePlan, options connectorOptions) ([]connect
 		if token == "" {
 			return nil, fmt.Errorf("plan needs RT: %s is not set (note that a value in ~/.bashrc must also be exported)", rtTokenEnv)
 		}
+		// The connector refuses an empty allowlist, correctly and fail-closed,
+		// but it is a library and cannot name the variable that would fix it.
+		// The caller knows; say it here.
+		queues := splitList(os.Getenv(rtQueuesEnv))
+		if len(queues) == 0 {
+			return nil, fmt.Errorf("plan needs RT: %s is not set (and must be exported); "+
+				"there is no safe default queue set, so the search is refused rather than run against every queue", rtQueuesEnv)
+		}
 		rt, err := connector.NewRTConnector(connector.RTConfig{
 			Endpoint: options.rtEndpoint,
 			Token:    token,
-			Queues:   splitList(os.Getenv(rtQueuesEnv)),
+			Queues:   queues,
 		})
 		if err != nil {
 			return nil, err
