@@ -220,6 +220,13 @@ var pricedRules = []struct {
 		"RT tickets routinely carry user PII and credentials pasted into a support request"},
 	{"ticket-age-direction", "bounds the older side",
 		"an unbounded fetch tallied 100 of 428 rows by hand, 2026-09-02"},
+	// Added after the eleven above, because selecting them from the incident
+	// record missed the rule governing the worst-performing case in the suite.
+	// Every rule guarded above covers a case scoring 3/3; this one covers the
+	// only case that does not, at 1/3 and 2/3 across both arms of an A/B.
+	{"ongoing-not-in-log", "wrote nothing between those hours",
+		"monitoring.history since 05:00 matched 0 events while 19 hosts had the agent down right now, " +
+			"and zero rows read as an all-clear"},
 }
 
 // TestPricedRulesSurvive fails if a rule with a known cost has been reworded
