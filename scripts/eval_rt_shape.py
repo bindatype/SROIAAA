@@ -33,12 +33,31 @@ TICKET_INTENTS = ("tickets.open", "tickets.for_host")
 
 # Five phrasings of the same question, because the failure may be specific to
 # wording, and three controls that must not acquire a bound.
+# Three kinds, because two turned out not to be enough.
+#
+#   age    the question names a threshold, so there is a right bound to send
+#   now    the question is about current state and must acquire no bound
+#   vague  the question implies age and names no threshold at all
+#
+# The vague kind exists because this harness scored a better answer as a
+# failure. Asked to "show me aging RT tickets grouped by who owns them", the
+# unbounded runs answered "453 open tickets" with a complete owner census; the
+# bounded runs invented a threshold -- one chose 30 days and said 341, another
+# chose 60 and said 304 -- and both carried a floor caveat because owner
+# discovery is page-based. Each bounded answer disclosed the threshold it used,
+# so none was deceptive, but no threshold was asked for and different runs
+# produced different numbers.
+#
+# There is no defensible right answer to assert there, so this asserts none.
+# What stays asserted is what is wrong under every reading: a `since` where
+# `until` belongs answers the opposite question, and that is never correct
+# however vague the wording.
 CASES = [
     ("age", "how many tickets in RT that are older than 60 days group them by owner"),
     ("age", "which open tickets have been open more than two months, by owner?"),
-    ("age", "show me aging RT tickets grouped by who owns them"),
     ("age", "how many open tickets were created before July?"),
-    ("age", "what is sitting in the RT queues the longest?"),
+    ("vague", "show me aging RT tickets grouped by who owns them"),
+    ("vague", "what is sitting in the RT queues the longest?"),
     ("now", "how many open tickets are there right now?"),
     ("now", "who owns the most open RT tickets?"),
     ("now", "are there any open tickets for dss01?"),
@@ -67,7 +86,16 @@ def classify(args):
 # Expected outcome per case kind. BOTH is not wrong for an age question -- a
 # window is narrower than a ray and still answers it -- so it is scored as a
 # pass and reported separately rather than silently merged.
-PASSING = {"age": (BOUNDED, BOTH), "now": (UNBOUNDED,)}
+#
+# A vague question accepts every shape except an inverted bound. It is not a
+# weaker test, it is a narrower one: it still fails the thing that is wrong
+# under any reading, and it no longer fails a model for choosing defensibly
+# between two readings a person would also have to choose between.
+PASSING = {
+    "age": (BOUNDED, BOTH),
+    "now": (UNBOUNDED,),
+    "vague": (BOUNDED, BOTH, UNBOUNDED),
+}
 
 
 SELF_TEST = [
@@ -85,6 +113,30 @@ SELF_TEST = [
 ]
 
 
+# What each kind must accept and must reject. The classifier was never the
+# thing that was wrong here -- the scoring was, and nothing tested it. A
+# harness that decides what counts as a failure needs its own definition of
+# failure pinned as firmly as its parser.
+SCORING_TEST = [
+    ("age", BOUNDED, True),
+    ("age", BOTH, True),
+    ("age", UNBOUNDED, False),
+    ("age", INVERTED, False),
+    ("now", UNBOUNDED, True),
+    ("now", BOUNDED, False),
+    ("now", INVERTED, False),
+    ("vague", UNBOUNDED, True),
+    ("vague", BOUNDED, True),
+    ("vague", BOTH, True),
+    ("vague", INVERTED, False),
+]
+
+
+def scores(kind, outcome):
+    """Whether one outcome passes for one kind of question."""
+    return outcome in PASSING[kind]
+
+
 def self_test():
     """Check the grader before trusting it against a model.
 
@@ -99,6 +151,17 @@ def self_test():
         if got != want:
             failures.append("classify(%r) = %s, want %s" % (args, got, want))
 
+    for kind, outcome, want in SCORING_TEST:
+        if scores(kind, outcome) != want:
+            failures.append("scores(%s, %s) = %s, want %s"
+                            % (kind, outcome, scores(kind, outcome), want))
+
+    # Every case kind must be scoreable. A kind added to CASES and forgotten in
+    # PASSING would raise mid-run, after the model calls have been spent.
+    for kind, _ in CASES:
+        if kind not in PASSING:
+            failures.append("case kind %r has no scoring rule" % kind)
+
     # The parser is half the grader, and it reads real trace text.
     trace = 'x\nintent_proposed {"intent":"tickets.open","until":"60d"}\nmore\n'
     if common.proposed_args(trace) != {"intent": "tickets.open", "until": "60d"}:
@@ -108,7 +171,8 @@ def self_test():
 
     for line in failures:
         print("SELF-TEST FAIL: " + line)
-    print("grader self-test: %d checks, %d failed" % (len(SELF_TEST) + 2, len(failures)))
+    print("grader self-test: %d checks, %d failed"
+          % (len(SELF_TEST) + len(SCORING_TEST) + len(CASES) + 2, len(failures)))
     return not failures
 
 
@@ -156,16 +220,31 @@ def main():
     lines.append("| Kind | Question | Passed | Outcomes |")
     lines.append("|---|---|---|---|")
 
-    failed_cases = 0
+    failed_cases, split_vague = 0, []
     for kind, question, outcomes in rows:
-        passing = PASSING[kind]
-        passed = sum(1 for o in outcomes if o in passing)
+        passed = sum(1 for o in outcomes if scores(kind, o))
         if passed < len(outcomes):
             failed_cases += 1
         spread = ", ".join("%s x%d" % (o, outcomes.count(o)) for o in sorted(set(outcomes)))
         lines.append("| %s | %s | %d/%d | %s |" % (kind, question, passed, len(outcomes), spread))
+        # A vague case passes on any shape but an inversion, so a disagreement
+        # between runs would otherwise vanish into a green row. It is the most
+        # interesting thing this harness can observe and it is not a failure.
+        if kind == "vague" and len(set(outcomes)) > 1:
+            split_vague.append((question, spread))
 
     lines += ["", "Totals: " + ", ".join("%s %d" % (k, tally[k]) for k in sorted(tally)), ""]
+
+    if split_vague:
+        lines.append("Vague questions the model answered two ways. Neither is scored a")
+        lines.append("failure -- the question names no threshold, so both readings are")
+        lines.append("defensible -- but the disagreement is worth reading, because a bounded")
+        lines.append("run invents a cutoff nobody asked for and different runs invent")
+        lines.append("different ones:")
+        lines.append("")
+        for question, spread in split_vague:
+            lines.append("- %s -> %s" % (question, spread))
+        lines.append("")
     if failed_cases == 0:
         lines.append("Every case behaved as intended. Note what this does and does not show:")
         lines.append("the model proposed the right shape on this revision. It does not show")
