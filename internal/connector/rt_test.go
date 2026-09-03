@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -460,4 +461,65 @@ func newTestRT(t *testing.T, endpoint string, queues []string) *RTConnector {
 		t.Fatalf("NewRTConnector() error = %v", err)
 	}
 	return connector
+}
+
+// TestRTQueueReferenceResolvesToAName pins the defect the live suite found on
+// 2026-09-03: per-item evidence named "queue 3" and "queue 6" where every
+// other part of this connector, and every operator, means a queue name.
+//
+// RT returns Queue as a bare reference whose only readable member is a numeric
+// id. The fix is to ask RT to expand it, so both halves are asserted here: the
+// request carries the expansion, and an expanded reference decodes to its name.
+func TestRTQueueReferenceResolvesToAName(t *testing.T) {
+	// The queue and owner censuses fire after the search, so capture the first
+	// request rather than the last: the expansion belongs on the search, which
+	// is the only call whose items are read.
+	var gotQuery url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if gotQuery == nil {
+			gotQuery = r.URL.Query()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"total":1,"items":[{
+			"id":"2264","Subject":"disk full on dss01","Status":"open",
+			"Queue":{"id":"10","type":"queue","Name":"alerts"},
+			"Owner":{"id":"someone@example.edu","type":"user"},
+			"Created":"2026-08-30T10:00:00Z","LastUpdated":"2026-08-30T11:00:00Z"}]}`)
+	}))
+	defer server.Close()
+
+	rt, err := NewRTConnector(RTConfig{Endpoint: server.URL, Token: "t", Queues: []string{"alerts"}})
+	if err != nil {
+		t.Fatalf("build connector: %v", err)
+	}
+	evidence, err := rt.Execute(context.Background(), broker.RouteStep{
+		Source: broker.SourceRequestTracker, Action: "tickets.search", Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	if got := gotQuery.Get(rtQueueNameField); got != "Name" {
+		t.Errorf("search did not ask RT to expand the queue reference: %s=%q, want %q",
+			rtQueueNameField, got, "Name")
+	}
+	if len(evidence.Items) == 0 {
+		t.Fatal("no items returned")
+	}
+	if queue := evidence.Items[0].Fields["queue"]; queue != "alerts" {
+		t.Errorf("queue = %q, want %q; a numeric id here means the reference was not resolved", queue, "alerts")
+	}
+}
+
+// TestRTUnexpandedReferenceKeepsItsID asserts the fallback still works. A user
+// reference carries no Name and its id is already a login name, so Owner reads
+// correctly without expansion and must not be broken by preferring Name.
+func TestRTUnexpandedReferenceKeepsItsID(t *testing.T) {
+	var ref rtRef
+	if err := ref.UnmarshalJSON([]byte(`{"id":"someone@example.edu","type":"user"}`)); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if string(ref) != "someone@example.edu" {
+		t.Errorf("owner = %q, want the login name from id", string(ref))
+	}
 }

@@ -23,6 +23,11 @@ const (
 	// pasted into a support request, and nothing here has decided that belongs
 	// in evidence handed to a model. The safe default is metadata only.
 	rtSearchFields = "Subject,Status,Queue,Owner,Created,LastUpdated"
+
+	// rtQueueNameField expands the Queue reference so RT returns the queue's
+	// name alongside its id. RT 2.0 spells sub-object expansion this way, and
+	// the live instance was checked before this was relied on.
+	rtQueueNameField = "fields[Queue]"
 	// maxRTQueueCensus bounds the per-queue breakdown fan-out. A queue
 	// allowlist is operator-curated and expected to be short; a long one is a
 	// configuration smell, not something to fan requests across silently.
@@ -260,6 +265,10 @@ func (c *RTConnector) search(ctx context.Context, query string, limit int) ([]Ev
 	values := url.Values{}
 	values.Set("query", query)
 	values.Set("fields", rtSearchFields)
+	// Without this RT returns Queue as a bare reference and the only readable
+	// thing in it is a numeric id. Evidence then names "queue 10" where an
+	// operator, and every other part of this connector, means "alerts".
+	values.Set(rtQueueNameField, "Name")
 	values.Set("per_page", strconv.Itoa(limit))
 	// Newest first: a reader asking what is open wants the most recent activity
 	// at the top, not whatever order the ticket IDs happen to sort in.
@@ -480,10 +489,18 @@ func (r *rtRef) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	var object struct {
-		ID string `json:"id"`
+		ID   string `json:"id"`
+		Name string `json:"Name"`
 	}
 	if err := json.Unmarshal(data, &object); err != nil {
 		return err
+	}
+	// Name when RT expanded the reference, id otherwise. A queue id is a
+	// number and means nothing to a reader; a user id is already the login
+	// name, which is why Owner needs no expansion and still reads correctly.
+	if object.Name != "" {
+		*r = rtRef(object.Name)
+		return nil
 	}
 	*r = rtRef(object.ID)
 	return nil
