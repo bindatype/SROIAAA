@@ -26,7 +26,7 @@ DEFAULT_MODELS = [
 
 
 def main():
-    require_env()
+    require_env("mindrouter", "zabbix", "wazuh")
     models = sys.argv[1:] or DEFAULT_MODELS
     binary = build_chat()
 

@@ -126,12 +126,10 @@ def main():
     if options.self_test:
         return
 
-    common.require_env()
-    for name in ("SROIAAA_RT_ENDPOINT", "RT_API_TOKEN", "SROIAAA_RT_QUEUES"):
-        if not os.environ.get(name):
-            sys.exit("%s is not set (and must be exported); without RT configured the "
-                     "intents are withheld from the model and every case would refuse "
-                     "for a reason that has nothing to do with what is being measured" % name)
+    # Zabbix and Wazuh are deliberately not required: this measures RT, and a
+    # harness that will not start without sources it never touches cannot run
+    # on a host where only the source under test is configured.
+    common.require_env("mindrouter", "rt")
 
     binary = common.build_chat()
     rows, tally = [], {}

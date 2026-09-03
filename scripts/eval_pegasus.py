@@ -45,7 +45,7 @@ def truth(sql):
 
 
 def main():
-    require_env()
+    require_env("mindrouter", "pegasus")
     model = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_MODEL
     binary = build_chat()
     print("model: %s" % model, flush=True)

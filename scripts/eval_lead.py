@@ -136,7 +136,7 @@ def without_rule(text):
 
 
 def main():
-    require_env()
+    require_env("mindrouter", "wazuh")
     model = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_MODEL
     binary = build_chat()
 

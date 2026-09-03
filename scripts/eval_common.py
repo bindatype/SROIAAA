@@ -17,18 +17,54 @@ _CTX = ssl.create_default_context()
 _CTX.check_hostname = False
 _CTX.verify_mode = ssl.CERT_NONE
 
-REQUIRED_ENV = ["SROIAAA_ZABBIX_ENDPOINT", "ZABBIX_RO_TOKEN",
-                "SROIAAA_WAZUH_ENDPOINT", "WAZUH_API_USERNAME",
-                "WAZUH_API_PASSWORD", "MINDROUTER_API_KEY",
-                "SROIAAA_MINDROUTER_ENDPOINT"]
+# What each source needs, and what its absence does to a run.
+#
+# The consequence matters as much as the variable list. An intent whose
+# connector is not configured is withheld from the model entirely -- correct,
+# and the reason the fail-closed design works -- so a harness run without it
+# does not fail loudly. Every case refuses, the model looks incapable, and the
+# report is a page of numbers about nothing. eval_pegasus.py did exactly this:
+# it required Zabbix and Wazuh and never checked SROIAAA_PEGASUS_DSN, the one
+# variable without which it cannot measure anything.
+SOURCE_ENV = {
+    "mindrouter": (["MINDROUTER_API_KEY", "SROIAAA_MINDROUTER_ENDPOINT"],
+                   "no model can be reached, so nothing runs at all"),
+    "zabbix": (["SROIAAA_ZABBIX_ENDPOINT", "ZABBIX_RO_TOKEN"],
+               "monitoring.problems and monitoring.history are withheld from the model"),
+    "wazuh": (["SROIAAA_WAZUH_ENDPOINT", "WAZUH_API_USERNAME", "WAZUH_API_PASSWORD"],
+              "fleet.inventory and agent.status are withheld from the model"),
+    "pegasus": (["SROIAAA_PEGASUS_DSN"],
+                "database.query is withheld from the model"),
+    "rt": (["SROIAAA_RT_ENDPOINT", "RT_API_TOKEN", "SROIAAA_RT_QUEUES"],
+           "tickets.open and tickets.for_host are withheld from the model"),
+}
+
+# What require_env() demanded before it took arguments. Kept as the default so
+# a harness that has not declared its sources behaves exactly as it did.
+DEFAULT_SOURCES = ("mindrouter", "zabbix", "wazuh")
+
+REQUIRED_ENV = [name for source in DEFAULT_SOURCES for name in SOURCE_ENV[source][0]]
 
 
-def require_env():
-    missing = [v for v in REQUIRED_ENV if not os.environ.get(v)]
-    if missing:
-        sys.exit("missing environment: %s\n"
+def require_env(*sources):
+    """Refuse to start without the sources this harness actually measures.
+
+    Name the sources a harness needs; the default is what every harness
+    demanded before this took arguments. Asking for more than a harness uses
+    is its own defect -- an RT evaluation that will not start without Zabbix
+    cannot run on a host where only RT is configured.
+    """
+    problems = []
+    for source in (sources or DEFAULT_SOURCES):
+        names, consequence = SOURCE_ENV[source]
+        missing = [name for name in names if not os.environ.get(name)]
+        if missing:
+            problems.append("  %-11s missing %s\n              -> %s"
+                            % (source, ", ".join(missing), consequence))
+    if problems:
+        sys.exit("this evaluation cannot measure anything without:\n%s\n\n"
                  "these must be exported, not merely set; try "
-                 "'source ~/.config/sroiaaa/env'" % ", ".join(missing))
+                 "'source ~/.config/sroiaaa/env'" % "\n".join(problems))
 
 
 def build_chat():

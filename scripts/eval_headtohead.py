@@ -76,7 +76,7 @@ def grade(case, answer):
 
 
 def main():
-    require_env()
+    require_env("mindrouter", "zabbix", "wazuh", "pegasus")
     models = sys.argv[1:] or ["llama3.3:latest", "gemma4:31b"]
     binary = build_chat()
 

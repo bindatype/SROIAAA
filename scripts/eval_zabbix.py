@@ -25,7 +25,7 @@ SUBJECT_HOST = os.environ.get("EVAL_HOST", "dss01")
 
 
 def main():
-    require_env()
+    require_env("mindrouter", "zabbix")
     model = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_MODEL
     binary = build_chat()
     print("model: %s   subject host: %s" % (model, SUBJECT_HOST), flush=True)
