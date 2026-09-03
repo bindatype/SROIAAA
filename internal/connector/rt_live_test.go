@@ -108,6 +108,11 @@ func TestRTLiveBoundNarrows(t *testing.T) {
 	open, older := unbounded.Summary["total_matching"], bounded.Summary["total_matching"]
 	t.Logf("open now: %d; older than %d days: %d", open, rtLiveAgeDays, older)
 
+	if open == 0 {
+		t.Skip("RT reports no open tickets in the allowlisted queues; a bound cannot be shown to narrow " +
+			"anything. Not a pass: check the queue names in " + rtLiveQueuesEnv)
+	}
+
 	if older > open {
 		t.Errorf("bounded total %d exceeds unbounded total %d: the bound widened the result", older, open)
 	}
@@ -138,21 +143,50 @@ func TestRTLiveBoundIsTheRightSide(t *testing.T) {
 		t.Skipf("no tickets older than %d days; nothing to check the direction against", rtLiveAgeDays)
 	}
 
+	// RT renders dates in more than one format depending on configuration, and
+	// nothing in the connector parses Created -- it is passed through as a
+	// string, so the fixtures assert a format nobody has checked against a
+	// live instance. Accept both, and count what was actually verified.
+	//
+	// The first version of this test logged an unparseable date and continued.
+	// Had the format differed, every item would have been skipped and the test
+	// would have PASSED having checked nothing -- reporting the bound
+	// direction as sound on the evidence of zero tickets. A check that cannot
+	// run must say so loudly; one that quietly verifies nothing is worse than
+	// no check, because it also stops anyone looking.
+	layouts := []string{time.RFC3339, "2006-01-02 15:04:05", "2006-01-02T15:04:05"}
+	checked, unparseable := 0, []string{}
 	for _, item := range evidence.Items {
 		raw := item.Fields["created"]
-		created, err := time.Parse(time.RFC3339, raw)
+		var created time.Time
+		var err error
+		for _, layout := range layouts {
+			if created, err = time.Parse(layout, raw); err == nil {
+				break
+			}
+		}
 		if err != nil {
-			// RT's own date rendering, not ours. Report rather than fail: a
-			// format this cannot read is worth knowing about but is not
-			// evidence the bound is wrong.
-			t.Logf("ticket %s: unparseable created %q (%v)", item.ID, raw, err)
+			unparseable = append(unparseable, fmt.Sprintf("%s=%q", item.ID, raw))
 			continue
 		}
+		checked++
 		if created.After(moment) {
 			t.Errorf("ticket %s was created %s, after the %s bound: the filter is inverted",
 				item.ID, created.Format(time.RFC3339), moment.Format(time.RFC3339))
 		}
 	}
+
+	if checked == 0 {
+		t.Fatalf("verified the bound direction against 0 of %d tickets: no created date matched any "+
+			"known layout (%s). Add RT's actual format to layouts -- until then this test proves nothing",
+			len(evidence.Items), strings.Join(unparseable[:min(3, len(unparseable))], ", "))
+	}
+	if len(unparseable) > 0 {
+		t.Errorf("verified %d of %d tickets; %d created dates were unreadable (%s)",
+			checked, len(evidence.Items), len(unparseable),
+			strings.Join(unparseable[:min(3, len(unparseable))], ", "))
+	}
+	t.Logf("bound direction verified against %d tickets", checked)
 }
 
 // TestRTLiveCensusAccountsForEveryTicket asserts the owner breakdown is a
@@ -224,10 +258,22 @@ func TestRTLiveHonoursTheQueueAllowlist(t *testing.T) {
 	for _, queue := range queues {
 		allowed[queue] = true
 	}
+	if len(evidence.Items) == 0 {
+		t.Skip("no open tickets returned; the allowlist was not exercised. Not a pass: nothing was checked")
+	}
+	seen := 0
 	for _, item := range evidence.Items {
-		if queue := item.Fields["queue"]; queue != "" && !allowed[queue] {
+		queue := item.Fields["queue"]
+		if queue == "" {
+			continue
+		}
+		seen++
+		if !allowed[queue] {
 			t.Errorf("ticket %s came from queue %q, which is not in %s", item.ID, queue, rtLiveQueuesEnv)
 		}
+	}
+	if seen == 0 {
+		t.Errorf("%d tickets returned and none carried a queue; the allowlist could not be checked", len(evidence.Items))
 	}
 	if breakdown, ok := evidence.Breakdown["tickets_by_queue"]; ok {
 		for queue := range breakdown {
@@ -251,7 +297,12 @@ func TestRTLiveCarriesNoTicketContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
-	allowed := map[string]bool{"queue": true, "owner": true, "created": true, "last_updated": true, "status": true}
+	if len(evidence.Items) == 0 {
+		t.Skip("no open tickets returned; the sensitivity boundary was not exercised. Not a pass")
+	}
+	// Exactly what normalizeTicket populates. A new field arriving here should
+	// fail until someone decides it is metadata rather than content.
+	allowed := map[string]bool{"queue": true, "owner": true, "created": true, "last_updated": true}
 	for _, item := range evidence.Items {
 		for field := range item.Fields {
 			if !allowed[field] {
