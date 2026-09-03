@@ -2,7 +2,7 @@ GO ?= go
 DIST ?= dist
 BINARY ?= sroiaaa-agent
 
-.PHONY: help install uninstall test check-entrypoints test-rt-live run fmt build-linux-amd64 build-linux-arm64 build-linux-all docker-build docker-up fitness eval-models eval-zabbix eval-pegasus eval-headtohead eval-ablate eval-prompt-ab eval-lead eval-rt-shape probe netbox-probe
+.PHONY: help install uninstall test verify check-entrypoints test-rt-live run fmt build-linux-amd64 build-linux-arm64 build-linux-all docker-build docker-up fitness eval-models eval-zabbix eval-pegasus eval-headtohead eval-ablate eval-prompt-ab eval-lead eval-rt-shape probe netbox-probe
 
 # Default target: say what exists. A bare `make` that silently builds one
 # thing tells a newcomer nothing about the other fifteen.
@@ -10,6 +10,7 @@ help:
 	@echo 'Setup and checks:'
 	@echo '  make test              unit tests; no credentials, no network'
 	@echo '  make install           put `ask` on your PATH (PREFIX=... to choose where)'
+	@echo '  make verify            everything that must pass before main; no credentials'
 	@echo '  make check-entrypoints check install, uninstall, and ask startup'
 	@echo '  make test-rt-live      RT invariants against live data (needs RT credentials)'
 	@echo '  make eval-rt-shape     does the model bound a ticket-age question (needs credentials)'
@@ -56,6 +57,15 @@ uninstall:
 
 test:
 	$(GO) test ./...
+
+# The gate for main. Formatting, build, vet, the full test suite, the entry
+# points, that the build-tagged live tests still compile and still do not run
+# by accident, and that the RT grader agrees with itself. No credentials, no
+# network, every check reported rather than the first one aborting the rest.
+#
+# There is no CI. This is the gate only while somebody runs it.
+verify:
+	@sh ./scripts/verify.sh
 
 # The path a new contributor walks before any Go test is relevant: make
 # install, then typing `ask`. Needs no credentials and no network.
