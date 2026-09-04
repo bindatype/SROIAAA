@@ -64,6 +64,39 @@ const (
 	// and authorized exactly as the first one is. Five is enough to look at a
 	// schema, run a query, and correct it once.
 	maxToolCalls = 5
+
+	// servedContextTokens is what the gateway actually serves, measured rather
+	// than read from configuration. /v1/models reports context_length 32768 for
+	// gemma4:31b while its model_max_context is 262144 and a console override
+	// claims 131072; the served path is what matters and it was measured by
+	// sending ~40,000 tokens, which came back reporting prompt_tokens=32768.
+	//
+	// Exceeding it is not an error. The gateway discards the HEAD and keeps the
+	// tail: with markers at both ends of an oversized request the model could
+	// see only the last one. The head is the system prompt, so every safety
+	// rule is the first thing thrown away, silently, exactly when the context
+	// is largest. That is why this is enforced here rather than trusted to the
+	// gateway.
+	//
+	// Re-measure after any gateway or model change; see the vault note.
+	servedContextTokens = 32768
+
+	// Two ratios, because one is wrong for half the content. Both were measured
+	// against gemma4:31b and both are rounded down, so the estimate runs high:
+	// refusing early is recoverable, a silently discarded system prompt is not.
+	//
+	// jsonCharsPerToken: 36,664 characters of live RT evidence tokenized to
+	// 14,137, which is 2.59. Structured JSON is dense in punctuation.
+	//
+	// proseCharsPerToken: the 28,431-byte prompt measured 6,366 tokens, which
+	// is 4.47. Using the JSON figure for prose overstates the prompt by 79% and
+	// leaves no room for evidence that in fact fits.
+	jsonCharsPerToken  = 2.5
+	proseCharsPerToken = 4.3
+
+	// answerReserveTokens is room kept for the reply. Nothing sets max_tokens
+	// on the request, so the answer competes with the input for one window.
+	answerReserveTokens = 1500
 )
 
 // ToolDefinition is the single tool exposed to the model. Its schema is the
@@ -231,6 +264,59 @@ func (s *Session) Trace() []TraceEntry {
 //
 // Every call is validated and authorized independently. More turns is more
 // opportunity to work, not more authority.
+// estimatedTokens is a deliberately pessimistic size for what will be sent.
+//
+// There is no tokenizer here, so this counts characters and divides by the
+// densest ratio measured. It exists to keep the request under a limit whose
+// breach is silent, and a guard against a silent failure has to err toward
+// refusing early.
+func estimatedTokens(messages []Message, tools []any) int {
+	tokens := 0
+	for _, m := range messages {
+		// A tool message carries evidence JSON; everything else is prose the
+		// model or the operator wrote.
+		ratio := proseCharsPerToken
+		if m.Role == "tool" {
+			ratio = jsonCharsPerToken
+		}
+		chars := len(m.Role) + len(m.Content) + len(m.Name) + len(m.ToolCallID)
+		for _, c := range m.ToolCalls {
+			chars += len(c.ID) + len(c.Function.Name) + len(c.Function.Arguments)
+		}
+		tokens += int(float64(chars) / ratio)
+	}
+	if encoded, err := json.Marshal(tools); err == nil {
+		tokens += int(float64(len(encoded)) / jsonCharsPerToken)
+	}
+	return tokens + answerReserveTokens
+}
+
+// roomForMore reports whether another payload of this size can be added
+// without the gateway silently discarding the head of the request.
+func roomForMore(messages []Message, tools []any, addition int) (int, bool) {
+	projected := estimatedTokens(messages, tools) + int(float64(addition)/jsonCharsPerToken)
+	return projected, projected <= servedContextTokens
+}
+
+// discloseWithheldEvidence appends the limitation when the model did not.
+//
+// Every mechanism in this project that expressed an absence by omission has
+// been read the reassuring way. A partial answer that does not say it is
+// partial is the same failure with a new cause.
+func discloseWithheldEvidence(answer string, withheld bool) string {
+	if !withheld {
+		return answer
+	}
+	low := strings.ToLower(answer)
+	for _, said := range []string{"withheld", "incomplete", "not all", "partial"} {
+		if strings.Contains(low, said) {
+			return answer
+		}
+	}
+	return answer + "\n\nThis answer is incomplete: further evidence was withheld because " +
+		"returning it would have exceeded the model's context. Ask a narrower question to see the rest."
+}
+
 func (s *Session) Ask(ctx context.Context, question string) (string, error) {
 	s.trace = nil
 	s.started = time.Now()
@@ -250,6 +336,7 @@ func (s *Session) Ask(ctx context.Context, question string) (string, error) {
 	tools := []any{ToolDefinition(s.intents)}
 
 	forceTool := ""
+	budgetReached := false
 	for turn := 0; turn < maxToolCalls; turn++ {
 		choice, err := s.client.Complete(ctx, messages, tools, forceTool)
 		forceTool = ""
@@ -288,6 +375,12 @@ func (s *Session) Ask(ctx context.Context, question string) (string, error) {
 			} else {
 				s.record("answer_synthesized", "", true)
 			}
+			// A result was withheld to keep the request inside the context.
+			// The model was told to say so; if it did not, the answer says it
+			// anyway. This is a fact about what was gathered, not a claim
+			// about the subject, and an answer that omits it reads as complete.
+			answer = discloseWithheldEvidence(answer, budgetReached)
+
 			s.event.Answer = answer
 			s.event.AnswerChars = len(answer)
 			return answer, nil
@@ -334,6 +427,27 @@ func (s *Session) Ask(ctx context.Context, question string) (string, error) {
 			messages = append(messages, Message{
 				Role: "tool", ToolCallID: call.ID, Name: toolName,
 				Content: `{"error":"the result was too large to return; narrow it or aggregate in SQL"}`,
+			})
+			continue
+		}
+
+		// The per-result cap says nothing about the total. Every result stays
+		// in the history, so five of them are sent together on the last turn,
+		// and the gateway responds to an oversized request by discarding the
+		// head rather than refusing it. Refusing here is the difference between
+		// an answer that says what it is missing and one that quietly lost its
+		// own instructions.
+		if projected, ok := roomForMore(messages, tools, len(evidenceJSON)); !ok {
+			s.record("evidence_withheld_for_context",
+				fmt.Sprintf("adding %d bytes would reach about %d tokens against a served limit of %d",
+					len(evidenceJSON), projected, servedContextTokens), false)
+			budgetReached = true
+			messages = append(messages, Message{
+				Role: "tool", ToolCallID: call.ID, Name: toolName,
+				Content: `{"error":"this result was withheld: returning it would exceed the model context ` +
+					`and silently discard your instructions","guidance":"Answer from the evidence you ` +
+					`already have, and state plainly that further evidence was withheld and the answer ` +
+					`is therefore incomplete."}`,
 			})
 			continue
 		}

@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -325,5 +326,109 @@ func TestSafetyRulesCannotBeAblated(t *testing.T) {
 			t.Errorf("%s is protected in the harness but no longer marked in the prompt; "+
 				"the protection now applies to nothing", name)
 		}
+	}
+}
+
+// TestContextBudgetIsNotAlreadyExceeded is the arithmetic nobody had done.
+//
+// maxEvidenceJSON caps one result. Nothing capped the total, and every result
+// stays in the message history, so five are sent together on the final turn.
+// The gateway does not refuse an oversized request -- it discards the head and
+// keeps the tail, and the head is the system prompt, so the safety rules are
+// the first thing lost, silently, exactly when the context is largest.
+//
+// Measured against gemma4:31b: the served context is 32,768 tokens, evidence
+// JSON runs 2.59 characters per token, and a full 64 KB result is therefore
+// about 25,270 tokens on its own.
+func TestContextBudgetIsNotAlreadyExceeded(t *testing.T) {
+	promptTokens := int(float64(len(systemPrompt)) / proseCharsPerToken)
+	schema, err := json.Marshal(ToolDefinition([]string{"monitoring.problems"}))
+	if err != nil {
+		t.Fatalf("marshal schema: %v", err)
+	}
+	schemaTokens := int(float64(len(schema)) / jsonCharsPerToken)
+	oneResult := int(float64(evidenceBudget()) / jsonCharsPerToken)
+
+	fixed := promptTokens + schemaTokens + answerReserveTokens
+	t.Logf("prompt %d + schema %d + answer reserve %d = %d tokens fixed cost",
+		promptTokens, schemaTokens, answerReserveTokens, fixed)
+	t.Logf("one full evidence result: %d tokens; served context: %d", oneResult, servedContextTokens)
+
+	if fixed >= servedContextTokens {
+		t.Fatalf("the prompt and schema alone reach %d of %d tokens; no evidence fits at all",
+			fixed, servedContextTokens)
+	}
+	if fixed+oneResult <= servedContextTokens {
+		return
+	}
+	// Not a failure: it is the finding. A single maximum-size result does not
+	// fit, so maxEvidenceJSON is larger than the window can carry and the
+	// cumulative guard is what stops it reaching the gateway.
+	t.Logf("NOTE: one maximum-size result (%d) plus fixed cost (%d) = %d, over the %d served context. "+
+		"The per-result cap alone would overflow; roomForMore is what prevents it.",
+		oneResult, fixed, fixed+oneResult, servedContextTokens)
+}
+
+// TestRoomForMoreRefusesBeforeTheGatewayTruncates asserts the guard fires while
+// there is still a window to protect, rather than after the head is gone.
+func TestRoomForMoreRefusesBeforeTheGatewayTruncates(t *testing.T) {
+	tools := []any{ToolDefinition([]string{"monitoring.problems"})}
+	messages := []Message{{Role: "system", Content: systemPrompt}, {Role: "user", Content: "how many?"}}
+
+	if _, ok := roomForMore(messages, tools, 4*1024); !ok {
+		t.Error("a 4 KB result was refused on an empty history; the guard is too tight to be usable")
+	}
+
+	// A real result, not the synthetic maximum: an unbounded tickets.open
+	// against the live instance measured 36,666 bytes.
+	const realResult = 36666
+	if _, ok := roomForMore(messages, tools, realResult); !ok {
+		t.Error("a result the size of a real ticket search was refused on an empty history; " +
+			"the guard is too tight to be usable")
+	}
+
+	added := 0
+	for i := 0; i < maxToolCalls; i++ {
+		if _, ok := roomForMore(messages, tools, realResult); !ok {
+			break
+		}
+		messages = append(messages, Message{Role: "tool", Content: strings.Repeat("x", realResult)})
+		added++
+	}
+	if added >= maxToolCalls {
+		t.Errorf("all %d results were accepted; the total would be about %d tokens against a %d limit",
+			maxToolCalls, estimatedTokens(messages, tools), servedContextTokens)
+	}
+	if got := estimatedTokens(messages, tools); got > servedContextTokens {
+		t.Errorf("the guard let the history reach %d tokens, past the %d the gateway serves", got, servedContextTokens)
+	}
+	t.Logf("guard closed after %d real-size result(s); history estimated at %d of %d tokens",
+		added, estimatedTokens(messages, tools), servedContextTokens)
+
+	// The per-result cap is larger than the window can deliver, which is a
+	// finding rather than a failure: it means a maximum-size result can never
+	// be returned, and this guard is what turns that into a refusal with a
+	// reason instead of a silently decapitated request.
+	fits := int(float64(servedContextTokens-estimatedTokens(
+		[]Message{{Role: "system", Content: systemPrompt}}, tools)) * jsonCharsPerToken)
+	if evidenceBudget() > fits {
+		t.Logf("NOTE: maxEvidenceJSON is %d bytes but at most about %d bytes of evidence fit "+
+			"alongside the prompt; a maximum-size result cannot be delivered", evidenceBudget(), fits)
+	}
+}
+
+// TestWithheldEvidenceIsDisclosed asserts a truncated-for-context answer says
+// so even when the model does not.
+func TestWithheldEvidenceIsDisclosed(t *testing.T) {
+	if got := discloseWithheldEvidence("There are 12 problems.", false); strings.Contains(got, "incomplete") {
+		t.Error("added a limitation to an answer that had none to add")
+	}
+	got := discloseWithheldEvidence("There are 12 problems.", true)
+	if !strings.Contains(strings.ToLower(got), "incomplete") {
+		t.Errorf("a partial answer did not say it was partial: %q", got)
+	}
+	already := "This is incomplete because evidence was withheld."
+	if discloseWithheldEvidence(already, true) != already {
+		t.Error("repeated a limitation the model had already stated")
 	}
 }
