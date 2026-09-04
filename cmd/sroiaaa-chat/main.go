@@ -102,7 +102,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	session, err := buildSession(*policyPath, *model, *endpoint, *zabbixEndpoint, *wazuhEndpoint, *rtEndpoint, *wazuhInsecure)
+	session, err := buildSession(*policyPath, *model, *endpoint, *zabbixEndpoint, *wazuhEndpoint, *rtEndpoint, *wazuhInsecure, *showTrace)
 	if err != nil {
 		fmt.Fprintf(stderr, "sroiaaa-chat: %v\n", err)
 		return 2
@@ -140,7 +140,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func buildSession(policyPath, model, endpoint, zabbixEndpoint, wazuhEndpoint, rtEndpoint string, wazuhInsecure bool) (*orchestrator.Session, error) {
+func buildSession(policyPath, model, endpoint, zabbixEndpoint, wazuhEndpoint, rtEndpoint string, wazuhInsecure, trace bool) (*orchestrator.Session, error) {
 	policyFile, err := os.Open(policyPath)
 	if err != nil {
 		return nil, fmt.Errorf("open policy: %w", err)
@@ -258,11 +258,15 @@ func buildSession(policyPath, model, endpoint, zabbixEndpoint, wazuhEndpoint, rt
 		return nil, fmt.Errorf("no connectors configured; set a source endpoint and its credentials")
 	}
 
-	// Name what is switched off. An intent whose connector does not exist is
-	// withheld from the model, and "I cannot answer that" is indistinguishable
-	// from a source that is down. One line on stderr is the difference.
-	if off := unconfiguredSources(zabbixEndpoint, wazuhEndpoint, rtEndpoint); len(off) > 0 {
-		fmt.Fprintf(os.Stderr, "note: not configured, so their questions will be refused: %s\n", strings.Join(off, "; "))
+	// What is switched off, for -trace only. This printed on every run, so a
+	// question about tickets was answered with a line about endpoint agents,
+	// and a source deliberately left unconfigured produced the same line
+	// forever. A notice that appears when it does not apply is read once and
+	// then never again, which is the state a real one needs to avoid.
+	if trace {
+		if off := unconfiguredSources(zabbixEndpoint, wazuhEndpoint, rtEndpoint); len(off) > 0 {
+			fmt.Fprintf(os.Stderr, "not configured: %s\n", strings.Join(off, "; "))
+		}
 	}
 
 	executor, err := connector.NewExecutor(connectors...)
