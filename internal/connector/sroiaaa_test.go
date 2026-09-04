@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -238,5 +239,67 @@ func TestSROIAAAUncountableDataWarns(t *testing.T) {
 				t.Error("evidence that supports no population claim returned no warning saying so")
 			}
 		})
+	}
+}
+
+// TestSROIAAAKeepsHostsIsolated asserts the property the per-host token design
+// exists for: a step for one host reaches that host's endpoint with that
+// host's token, and never another's. Every other test here configures a single
+// agent, so the claim in Execute's comment had nothing behind it.
+func TestSROIAAAKeepsHostsIsolated(t *testing.T) {
+	type seen struct{ auth, path string }
+	got := map[string]seen{}
+
+	mk := func(name string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got[name] = seen{auth: r.Header.Get("Authorization"), path: r.URL.Path}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"request_id":"1","operation":"filesystem.list","status":"ok",
+				"metadata":{"truncated":false},"data":{"path":"/workspace","entries":[]}}`)
+		}))
+	}
+	alpha, beta := mk("alpha"), mk("beta")
+	defer alpha.Close()
+	defer beta.Close()
+
+	rt, err := NewSROIAAAConnector(SROIAAAConfig{Agents: map[string]SROIAAAAgentConfig{
+		"alpha.example.edu": {Endpoint: alpha.URL, Token: "token-for-alpha"},
+		"beta.example.edu":  {Endpoint: beta.URL, Token: "token-for-beta"},
+	}})
+	if err != nil {
+		t.Fatalf("build connector: %v", err)
+	}
+
+	// Both directions, because one is not enough: resolving to "whichever
+	// agent the map yields first" passes a single-host check whenever the map
+	// happens to yield the right one. Measured at 2 detections in 7 runs
+	// before this loop existed. Exercising both hosts fails under either
+	// iteration order.
+	for _, host := range []string{"alpha.example.edu", "beta.example.edu"} {
+		for k := range got {
+			delete(got, k)
+		}
+		step := broker.RouteStep{
+			Source: broker.SourceSROIAAA, Action: "operations.execute",
+			Host: host, Operation: "filesystem.list",
+			Target: &broker.OperationTarget{Path: "/workspace"},
+		}
+		if _, err := rt.Execute(context.Background(), step); err != nil {
+			t.Fatalf("execute for %s: %v", host, err)
+		}
+
+		want := strings.Split(host, ".")[0]
+		other := map[string]string{"alpha": "beta", "beta": "alpha"}[want]
+
+		if _, reached := got[other]; reached {
+			t.Errorf("a step for %s reached %s's endpoint", want, other)
+		}
+		reached, ok := got[want]
+		if !ok {
+			t.Fatalf("the step for %s never reached the host it named", want)
+		}
+		if reached.auth != "Bearer token-for-"+want {
+			t.Errorf("%s was sent %q; a host must only ever receive its own token", want, reached.auth)
+		}
 	}
 }
