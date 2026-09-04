@@ -165,7 +165,11 @@ fi
 
 # Non-zero if nothing reached the channel, so cron mails on a total failure
 # even before the watchdog next runs.
-[ "$POSTED" -gt 0 ] || {
+#
+# Not on a dry run: it posts nothing by design, so counting zero posts as a
+# failure would make the one command you use to test the digest by hand always
+# report that the digest is broken.
+if [ "$DRY" -eq 0 ] && [ "$POSTED" -eq 0 ]; then
 	echo "zoom-digest: no section reached the channel" >&2
 	exit 1
-}
+fi
