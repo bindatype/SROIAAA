@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/maclach/sroiaaa/internal/broker"
 )
@@ -306,8 +307,13 @@ func TestRTConnectorFiltersByCreatedDate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if !strings.Contains(capturedQuery, "Created < '2026-07-04 00:00:00'") {
-		t.Errorf("query = %q, want the until bound translated into a Created upper bound", capturedQuery)
+	// 2026-07-04T00:00:00Z is 20:00 on the 3rd in New York, and that is what RT
+	// must be sent: it parses a bare literal in the server's zone while
+	// returning Created in UTC. A ticket created at 2026-09-03T07:49:10Z
+	// matches Created > '2026-09-03 00:00:00' and not '2026-09-03 04:00:00',
+	// which is only true if the literal is read as 03:49 local.
+	if !strings.Contains(capturedQuery, "Created < '2026-07-03 20:00:00'") {
+		t.Errorf("query = %q, want the until instant rendered in RT's zone", capturedQuery)
 	}
 	// RT's own total for the bounded query, not a count derived from a page.
 	if evidence.TotalAvailable != 35 {
@@ -456,6 +462,9 @@ func newTestRT(t *testing.T, endpoint string, queues []string) *RTConnector {
 		Endpoint: endpoint,
 		Token:    "rt-test-token",
 		Queues:   queues,
+		// Pinned, or these assertions pass on an Eastern laptop and fail on a
+		// UTC runner. The zone is the whole point of what is being asserted.
+		Location: testRTZone(t),
 	})
 	if err != nil {
 		t.Fatalf("NewRTConnector() error = %v", err)
@@ -521,5 +530,46 @@ func TestRTUnexpandedReferenceKeepsItsID(t *testing.T) {
 	}
 	if string(ref) != "someone@example.edu" {
 		t.Errorf("owner = %q, want the login name from id", string(ref))
+	}
+}
+
+// testRTZone pins the zone these tests assume RT parses literals in.
+func testRTZone(t *testing.T) *time.Location {
+	t.Helper()
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("no tzdata: %v", err)
+	}
+	return loc
+}
+
+// TestRTDateBoundRendersInRTsZone pins the bug that made "how many tickets
+// were submitted today" answer 21 against a true 22.
+//
+// The broker resolves a day in the operator's zone and hands over a UTC
+// instant. RT parses a bare date literal in the server's zone, so rendering
+// that instant as UTC moves the bound by the offset -- four hours late in
+// summer, which dropped a ticket filed at 03:49.
+//
+// Two bugs used to cancel: the broker handed over a local calendar date
+// stamped midnight UTC, which rendered here as local midnight and was right by
+// accident. Fixing the broker in 8e52f8c exposed this one.
+func TestRTDateBoundRendersInRTsZone(t *testing.T) {
+	zone := testRTZone(t)
+	for _, test := range []struct{ instant, want string }{
+		// Local midnight on 3 September, as the broker now resolves "today".
+		{"2026-09-03T04:00:00Z", "2026-09-03 00:00:00"},
+		// Winter, when the offset is five hours rather than four.
+		{"2026-01-15T05:00:00Z", "2026-01-15 00:00:00"},
+		{"", ""},
+	} {
+		got, err := rtDateBound(test.instant, zone)
+		if err != nil {
+			t.Errorf("rtDateBound(%q) error = %v", test.instant, err)
+			continue
+		}
+		if got != test.want {
+			t.Errorf("rtDateBound(%q) = %q, want %q", test.instant, got, test.want)
+		}
 	}
 }

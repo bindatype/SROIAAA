@@ -58,7 +58,12 @@ type RTConfig struct {
 	// Queues allowlists which RT queues are searchable. Empty means none: a
 	// connector with no configured queues cannot search RT at all, rather
 	// than searching every queue an operator never reviewed.
-	Queues           []string
+	Queues []string
+	// Location is the zone RT parses a bare date literal in. Defaults to the
+	// host's local zone, which is the right guess when RT and SROIAAA sit at
+	// the same institution, and is explicit here so a test can pin it and a
+	// reader can see there is an assumption at all.
+	Location         *time.Location
 	Timeout          time.Duration
 	MaxResponseBytes int64
 }
@@ -71,6 +76,7 @@ type RTConfig struct {
 // a deliberate scope decision, not an oversight to fix later. See
 // docs/adding-a-connector.md, "How sensitive is the content?".
 type RTConnector struct {
+	location         *time.Location
 	endpoint         string
 	token            string
 	queues           []string
@@ -116,7 +122,13 @@ func NewRTConnector(config RTConfig) (*RTConnector, error) {
 		maxBytes = rtMaxResponseBytes
 	}
 
+	location := config.Location
+	if location == nil {
+		location = time.Local
+	}
+
 	return &RTConnector{
+		location:         location,
 		endpoint:         strings.TrimRight(config.Endpoint, "/"),
 		token:            config.Token,
 		queues:           queues,
@@ -150,11 +162,11 @@ func (c *RTConnector) Execute(ctx context.Context, step broker.RouteStep) (Evide
 	// open. RT computes the exact count for the bounded query itself, so
 	// "how many tickets older than 60 days" never has to be answered by
 	// counting dates off a truncated page.
-	since, err := rtDateBound(step.Since)
+	since, err := rtDateBound(step.Since, c.location)
 	if err != nil {
 		return Evidence{}, err
 	}
-	until, err := rtDateBound(step.Until)
+	until, err := rtDateBound(step.Until, c.location)
 	if err != nil {
 		return Evidence{}, err
 	}
@@ -248,7 +260,7 @@ func (c *RTConnector) Execute(ctx context.Context, step broker.RouteStep) (Evide
 // rtDateBound converts a broker-normalized RFC 3339 time bound into the
 // literal RT's TicketSQL date comparison expects. Empty stays empty: an
 // unset bound must not become a comparison against the zero time.
-func rtDateBound(value string) (string, error) {
+func rtDateBound(value string, loc *time.Location) (string, error) {
 	if value == "" {
 		return "", nil
 	}
@@ -256,7 +268,23 @@ func rtDateBound(value string) (string, error) {
 	if err != nil {
 		return "", newConnectorError("invalid_time_bound", err.Error())
 	}
-	return moment.UTC().Format("2006-01-02 15:04:05"), nil
+	// Rendered in local time, because RT parses a bare date literal in the
+	// server's zone while returning Created in UTC. A ticket created at
+	// 2026-09-03T07:49:10Z matches Created > '2026-09-03 00:00:00' and not
+	// Created > '2026-09-03 04:00:00', which is only true if the literal is
+	// read as 03:49 local.
+	//
+	// This was masked until 8e52f8c. The broker used to hand over a local
+	// calendar date stamped midnight UTC, which formatted to local midnight
+	// here and was right by accident. Fixing the broker to resolve a real
+	// local day moved this bound four hours late, and "how many tickets were
+	// submitted today" answered 21 against a true 22, missing one filed at
+	// 03:49 in the morning.
+	//
+	// This assumes RT keeps the same zone as the host running SROIAAA. Both
+	// are at the same institution; if RT ever moves, this is where it breaks,
+	// and the symptom is a bound wrong by exactly the offset between them.
+	return moment.In(loc).Format("2006-01-02 15:04:05"), nil
 }
 
 // search runs one bounded ticket search and returns normalized items plus the
