@@ -4,7 +4,8 @@
 Usage:
     source ~/.config/sroiaaa/env
     python3 scripts/eval_prompt_ab.py [model]
-    RUNS=5 python3 scripts/eval_prompt_ab.py gemma4:31b
+    RUNS=5 python3 scripts/eval_prompt_ab.py             # uses $SROIAAA_MODEL
+    RUNS=5 python3 scripts/eval_prompt_ab.py gemma4-31b-vllm
 
 What this does and does not measure
 -----------------------------------
@@ -36,7 +37,7 @@ PROMPT = os.path.join(ROOT, "internal", "orchestrator", "prompt.md")
 # The commit before the Zabbix query-control work began.
 BASELINE_REV = os.environ.get("BASELINE_REV", "e94a4dd")
 RUNS = int(os.environ.get("RUNS", "3"))
-DEFAULT_MODEL = os.environ.get("EVAL_MODEL", "gemma4:31b")
+DEFAULT_MODEL = common.default_model()
 
 _CTX = ssl.create_default_context()
 _CTX.check_hostname = False

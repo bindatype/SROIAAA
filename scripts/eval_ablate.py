@@ -118,7 +118,7 @@ def score(model, prompt_path):
 
 def main():
     require_env()
-    model = sys.argv[1] if len(sys.argv) > 1 else "gemma4:31b"
+    model = sys.argv[1] if len(sys.argv) > 1 else common.default_model()
     original = open(PROMPT).read()
     names = ablatable(original)
     skipped = sorted(SAFETY_RULES)

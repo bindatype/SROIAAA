@@ -3,7 +3,7 @@
 
 Usage:
     source ~/.config/sroiaaa/env
-    python3 scripts/eval_headtohead.py llama3.3:latest gemma4:31b
+    python3 scripts/eval_headtohead.py gemma4-31b-vllm some-other-model
 
 Every earlier comparison used one question, an aggregate returning a single
 row. Two models scored perfectly on it and nothing separated them, because the
@@ -77,7 +77,15 @@ def grade(case, answer):
 
 def main():
     require_env("mindrouter", "zabbix", "wazuh", "pegasus")
-    models = sys.argv[1:] or ["llama3.3:latest", "gemma4:31b"]
+    # No default pair. There used to be one, naming two models the gateway has
+    # since stopped serving, so a bare run failed at the first call with a
+    # model-not-found rather than saying what it needed. A comparison has to be
+    # told what to compare.
+    models = sys.argv[1:]
+    if len(models) < 2:
+        sys.exit("usage: eval_headtohead.py MODEL MODEL [MODEL...]\n"
+                 "  a head-to-head needs at least two models to compare;\n"
+                 "  the gateway's current default is %s" % common.default_model())
     binary = build_chat()
 
     day = "2025-08-05"

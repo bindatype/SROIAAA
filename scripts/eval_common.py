@@ -10,6 +10,28 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_POLICY = os.path.join(ROOT, "configs", "broker-policy.example.json")
 RUNTIME = os.path.join(ROOT, "runtime")
 
+# The one place a model name is resolved for the whole harness.
+#
+# Seven eval scripts each held their own default. Three read EVAL_MODEL, one
+# read SROIAAA_EVAL_MODEL, three read nothing, and all seven named gemma4:31b,
+# which the gateway stopped serving. `ask` had meanwhile been made
+# configurable through SROIAAA_MODEL, so the deployment was answering on one
+# model while every measurement of it silently named another -- or, once the
+# old name was withdrawn, failed at the first call.
+#
+# Precedence: an explicit argument wins, then the harness override, then
+# whatever `ask` itself would use, then a fallback that is only reached on a
+# machine with no environment at all.
+FALLBACK_MODEL = "gemma4-31b-vllm"
+
+
+def default_model():
+    for name in ("SROIAAA_EVAL_MODEL", "EVAL_MODEL", "SROIAAA_MODEL"):
+        value = os.environ.get(name)
+        if value:
+            return value
+    return FALLBACK_MODEL
+
 # The Wazuh manager presents a self-signed certificate; see the Wazuh
 # Interaction Guide. Verification is disabled only for these ground-truth
 # probes, which is the same posture the connector requires an explicit flag for.

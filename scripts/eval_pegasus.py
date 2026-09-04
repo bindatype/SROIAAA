@@ -27,7 +27,7 @@ from eval_common import (ask, build_chat, normalize, require_env,
 # docs/onboarding.md. These scripts used to default to qwen3.6:35b, so the
 # step the onboarding doc gives a newcomer to verify their setup exercised a
 # model that was not the one they would actually be using.
-DEFAULT_MODEL = os.environ.get("EVAL_MODEL", "gemma4:31b")
+DEFAULT_MODEL = common.default_model()
 
 
 def truth(sql):

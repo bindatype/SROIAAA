@@ -4,7 +4,8 @@
 Usage:
     source ~/.config/sroiaaa/env
     python3 scripts/eval_lead.py [model]
-    RUNS=15 python3 scripts/eval_lead.py gemma4:31b
+    RUNS=15 python3 scripts/eval_lead.py            # uses $SROIAAA_MODEL
+    RUNS=15 python3 scripts/eval_lead.py gemma4-31b-vllm
 
 Why this is separate from eval_prompt_ab.py
 -------------------------------------------
@@ -44,7 +45,7 @@ from eval_common import build_chat, first_sentence, normalize, require_env, writ
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROMPT = os.path.join(ROOT, "internal", "orchestrator", "prompt.md")
 RUNS = int(os.environ.get("RUNS", "10"))
-DEFAULT_MODEL = os.environ.get("EVAL_MODEL", "gemma4:31b")
+DEFAULT_MODEL = common.default_model()
 
 RULE_ANCHOR = '**Lead with the broken thing, not with the true "no".**'
 

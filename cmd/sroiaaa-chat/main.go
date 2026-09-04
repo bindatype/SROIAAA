@@ -51,10 +51,18 @@ const (
 	// llama3.3's 28/30 at 15.2s. Earlier single-question comparisons could not
 	// separate them; the concept case did.
 	//
-	// Do not change this fallback without rerunning that suite. Deployments can
-	// select a MindRouter alias with SROIAAA_MODEL, and callers can override
-	// either value per call with -model.
-	defaultModel = "gemma4:31b"
+	// That instruction stands, and this value no longer satisfies it. On
+	// 2026-09-04 the gateway withdrew gemma4:31b and now serves exactly one
+	// model, gemma4-31b-vllm, so the suite cannot be rerun as a comparison and
+	// this fallback is a forced substitution rather than a graded choice. It
+	// has been exercised end to end -- the evidence loop answers correctly on
+	// it -- but it has not been scored against an alternative, because there
+	// is none to score it against.
+	//
+	// Restore the grading the first time a second model is served. Deployments
+	// can select a MindRouter alias with SROIAAA_MODEL, and callers can
+	// override either value per call with -model.
+	defaultModel = "gemma4-31b-vllm"
 )
 
 func main() {

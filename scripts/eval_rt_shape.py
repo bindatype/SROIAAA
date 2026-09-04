@@ -182,7 +182,7 @@ def main():
                         help="check the grader and exit; needs no credentials")
     parser.add_argument("--runs", type=int, default=5,
                         help="runs per case (default 5)")
-    parser.add_argument("--model", default=os.environ.get("SROIAAA_EVAL_MODEL", "gemma4:31b"))
+    parser.add_argument("--model", default=common.default_model())
     options = parser.parse_args()
 
     if not self_test():
