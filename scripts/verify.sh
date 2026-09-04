@@ -77,14 +77,22 @@ else
 	bad "entry points" "$(sh ./scripts/check_entrypoints.sh 2>&1 | grep -i fail | head -3)"
 fi
 
+# Import rather than parse. Parsing catches a syntax error and nothing else:
+# six of these scripts once referred to an undefined name at module level --
+# every one of them died on its first line -- and this check reported them all
+# green, because the file parsed. Importing runs the module top level, which is
+# where a harness keeps the names it resolves before it does any work. Nothing
+# here touches the network: every script defers that to main().
 badpy=""
 for script in scripts/*.py; do
-	python3 -c "import ast,sys;ast.parse(open(sys.argv[1]).read())" "$script" 2>/dev/null || badpy="$badpy $script"
+	name=$(basename "$script" .py)
+	err=$(cd scripts && python3 -c "import $name" 2>&1) || badpy="$badpy
+  $script: $(printf '%s' "$err" | tail -1)"
 done
 if [ -z "$badpy" ]; then
-	ok "evaluation harnesses parse"
+	ok "evaluation harnesses import"
 else
-	bad "evaluation harnesses do not parse" "$badpy"
+	bad "evaluation harnesses do not import" "$badpy"
 fi
 
 # The grader decides what every RT shape result means, and nothing in a run

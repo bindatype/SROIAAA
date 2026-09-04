@@ -20,14 +20,16 @@ that was capped.
 import datetime, os, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from eval_common import (ask, build_chat, normalize, require_env,
-                         states_a_number, write_report)
+from eval_common import (ask, build_chat, default_model, normalize,
+                         require_env, states_a_number, write_report)
 
-# The project default, chosen on 2026-08-28 by eval_headtohead and recorded in
-# docs/onboarding.md. These scripts used to default to qwen3.6:35b, so the
-# step the onboarding doc gives a newcomer to verify their setup exercised a
-# model that was not the one they would actually be using.
-DEFAULT_MODEL = common.default_model()
+# Resolved centrally, so this harness cannot drift from the model the
+# deployment is actually running. It has drifted twice: these scripts once
+# defaulted to qwen3.6:35b while the deployment used something else, so the
+# step onboarding gives a newcomer to verify their setup exercised the wrong
+# model; and then to gemma4:31b after the gateway had withdrawn it. See
+# eval_common.default_model().
+DEFAULT_MODEL = default_model()
 
 
 def truth(sql):

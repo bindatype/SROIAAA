@@ -28,7 +28,7 @@ refuses to run if any name on it has stopped existing.
 import os, re, subprocess, sys, tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from eval_common import require_env, write_report
+from eval_common import default_model, require_env, write_report
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROMPT = os.path.join(ROOT, "internal", "orchestrator", "prompt.md")
@@ -118,7 +118,7 @@ def score(model, prompt_path):
 
 def main():
     require_env()
-    model = sys.argv[1] if len(sys.argv) > 1 else common.default_model()
+    model = sys.argv[1] if len(sys.argv) > 1 else default_model()
     original = open(PROMPT).read()
     names = ablatable(original)
     skipped = sorted(SAFETY_RULES)

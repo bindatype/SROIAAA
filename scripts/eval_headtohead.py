@@ -22,7 +22,8 @@ Ground truth is computed here, per question, immediately before the run.
 import json, os, re, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from eval_common import build_chat, normalize, require_env, states_a_number, write_report
+from eval_common import (build_chat, default_model, normalize, require_env,
+                        states_a_number, write_report)
 
 RUNS = int(os.environ.get("RUNS", "5"))
 
@@ -85,7 +86,7 @@ def main():
     if len(models) < 2:
         sys.exit("usage: eval_headtohead.py MODEL MODEL [MODEL...]\n"
                  "  a head-to-head needs at least two models to compare;\n"
-                 "  the gateway's current default is %s" % common.default_model())
+                 "  the gateway's current default is %s" % default_model())
     binary = build_chat()
 
     day = "2025-08-05"

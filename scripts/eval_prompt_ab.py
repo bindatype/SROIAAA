@@ -30,14 +30,15 @@ and 1850 across a single afternoon.
 import datetime, json, os, ssl, subprocess, sys, time, urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from eval_common import build_chat, first_sentence, normalize, require_env, write_report
+from eval_common import (build_chat, default_model, first_sentence, normalize,
+                        require_env, write_report)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROMPT = os.path.join(ROOT, "internal", "orchestrator", "prompt.md")
 # The commit before the Zabbix query-control work began.
 BASELINE_REV = os.environ.get("BASELINE_REV", "e94a4dd")
 RUNS = int(os.environ.get("RUNS", "3"))
-DEFAULT_MODEL = common.default_model()
+DEFAULT_MODEL = default_model()
 
 _CTX = ssl.create_default_context()
 _CTX.check_hostname = False
