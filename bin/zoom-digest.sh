@@ -7,7 +7,14 @@
 #   sh bin/zoom-digest.sh -n Wazuh   # just that one section
 #
 # From cron, source the environment first; cron gets almost none of it:
-#   0 7 * * 1-5 . $HOME/.config/sroiaaa/env && sh $HOME/sroiaaa-src/bin/zoom-digest.sh
+#   45 4 * * * . $HOME/.config/sroiaaa/env && sh $HOME/dev/SROIAAA/bin/zoom-digest.sh
+#
+# Give cron the FULL path to this script rather than `cd`-ing to the repo and
+# using a relative one. That line used to read `cd $HOME/sroiaaa-src && sh
+# bin/zoom-digest.sh`; the repository moved, the `cd` failed, `&&` swallowed
+# the rest, and the digest stopped for six days without one word in the log --
+# because the redirect that would have caught the error was attached to the
+# command that never ran. Pair it with bin/zoom-watchdog.sh, which notices.
 #
 # The signature construction Zoom accepts was confirmed on 2026-08-30 and is
 # the built-in default, so SROIAAA_ZOOM_SIGNATURE_VARIANT need not be set. If
@@ -69,6 +76,15 @@ fi
 POLICY=${SROIAAA_POLICY:-"$ROOT/configs/broker-policy.example.json"}
 BIN=${SROIAAA_BIN:-"$ROOT/runtime"}
 
+# The receipt records that a real post happened, and is what bin/zoom-watchdog.sh
+# reads to decide the digest has gone quiet.
+#
+# It lives outside the repository on purpose. Putting it in runtime/ would tie
+# the evidence-that-it-ran to the very directory whose disappearance is the
+# thing most likely to stop it running -- the receipt would vanish along with
+# the digest, and a watchdog cannot tell "never ran" from "never installed".
+RECEIPT=${SROIAAA_DIGEST_RECEIPT:-"$HOME/.local/state/sroiaaa/zoom-digest.receipt"}
+
 mkdir -p "$BIN"
 go build -o "$BIN/sroiaaa-chat" "$ROOT/cmd/sroiaaa-chat"
 [ "$DRY" -eq 1 ] || go build -o "$BIN/sroiaaa-notify" "$ROOT/cmd/sroiaaa-notify"
@@ -94,10 +110,22 @@ digest() {
 		# Same text the channel would receive, marked so a dry run is never
 		# mistaken for a real one in a scrollback.
 		printf '\n--- %s --- (dry run, not posted)\n%s\n' "$title" "$body"
+		return 0
+	fi
+
+	# A section that could not be answered still posts, saying so; what is
+	# counted here is whether the message reached the channel, which is the
+	# only thing the watchdog can act on.
+	if printf '%s\n' "$body" | "$BIN/sroiaaa-notify" -title "$title"; then
+		POSTED=$((POSTED + 1))
 	else
-		printf '%s\n' "$body" | "$BIN/sroiaaa-notify" -title "$title"
+		UNSENT=$((UNSENT + 1))
+		echo "zoom-digest: could not post section: $title" >&2
 	fi
 }
+
+POSTED=0
+UNSENT=0
 
 digest "Zabbix overnight" "what problems started since yesterday, and how many are there by severity?"
 # Critical groups are set by SROIAAA_WAZUH_CRITICAL_GROUPS and marked in the
@@ -108,3 +136,30 @@ digest "Wazuh agents" "how many agents are disconnected right now, and are any o
 # window holds only the leading edge and reads as an idle cluster every
 # morning. A complete past day is the honest question.
 digest "Scheduler" "for the most recent complete day in runTBL2: how many jobs completed and how many failed, and what was the median wait time for the cpu partition and for the gpu partition? Say which day, and give wait times in seconds and minutes."
+
+# A dry run deliberately writes no receipt. If it did, testing by hand would
+# reset the watchdog's clock and hide a cron that has not fired in a week --
+# which is exactly the state this whole mechanism exists to surface, and
+# exactly what the log looked like when it was in it: the last thing written
+# was a hand-run dry run, reading like a success.
+if [ "$DRY" -eq 0 ]; then
+	mkdir -p "$(dirname -- "$RECEIPT")"
+	# Written whole and moved into place, so the watchdog never reads a
+	# half-written receipt and alarms about a digest that is running fine.
+	tmp=$(mktemp "$RECEIPT.XXXXXX")
+	{
+		echo "last_run=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+		echo "last_run_epoch=$(date +%s)"
+		echo "posted=$POSTED"
+		echo "unsent=$UNSENT"
+		echo "root=$ROOT"
+	} >"$tmp"
+	mv -- "$tmp" "$RECEIPT"
+fi
+
+# Non-zero if nothing reached the channel, so cron mails on a total failure
+# even before the watchdog next runs.
+[ "$POSTED" -gt 0 ] || {
+	echo "zoom-digest: no section reached the channel" >&2
+	exit 1
+}

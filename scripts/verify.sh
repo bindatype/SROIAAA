@@ -95,6 +95,22 @@ else
 	bad "evaluation harnesses do not import" "$badpy"
 fi
 
+# Shell scripts are checked for syntax the way the Python ones are checked for
+# import. Nothing else runs them: bin/zoom-digest.sh fires from cron at 04:45,
+# and a typo in it surfaces as a line in a log nobody reads -- which is exactly
+# how it went six days without posting.
+badsh=""
+for script in bin/*.sh scripts/*.sh; do
+	[ -e "$script" ] || continue
+	err=$(sh -n "$script" 2>&1) || badsh="$badsh
+  $script: $(printf '%s' "$err" | head -1)"
+done
+if [ -z "$badsh" ]; then
+	ok "shell scripts parse"
+else
+	bad "shell scripts do not parse" "$badsh"
+fi
+
 # The grader decides what every RT shape result means, and nothing in a run
 # notices when a grader is wrong: the numbers come out and look like results.
 if python3 ./scripts/eval_rt_shape.py --self-test >/dev/null 2>&1; then
