@@ -18,6 +18,7 @@ import (
 const (
 	mindrouterEndpointEnv = "SROIAAA_MINDROUTER_ENDPOINT"
 	mindrouterKeyEnv      = "MINDROUTER_API_KEY"
+	mindrouterModelEnv    = "SROIAAA_MODEL"
 	zabbixEndpointEnv     = "SROIAAA_ZABBIX_ENDPOINT"
 	zabbixTokenEnv        = "ZABBIX_RO_TOKEN"
 	wazuhEndpointEnv      = "SROIAAA_WAZUH_ENDPOINT"
@@ -50,8 +51,9 @@ const (
 	// llama3.3's 28/30 at 15.2s. Earlier single-question comparisons could not
 	// separate them; the concept case did.
 	//
-	// Do not change this without rerunning that suite. Override per call with
-	// -model.
+	// Do not change this fallback without rerunning that suite. Deployments can
+	// select a MindRouter alias with SROIAAA_MODEL, and callers can override
+	// either value per call with -model.
 	defaultModel = "gemma4:31b"
 )
 
@@ -63,9 +65,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("sroiaaa-chat", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	policyPath := flags.String("policy", "", "path to a broker policy JSON file")
-	// Prefer a MindRouter alias here once one exists, so the client contract is
-	// the role rather than a specific model.
-	model := flags.String("model", defaultModel, "model or alias to ask")
+	model := flags.String("model", configuredModel(), "model or alias to ask")
 	endpoint := flags.String("mindrouter-endpoint", os.Getenv(mindrouterEndpointEnv), "MindRouter base URL")
 	zabbixEndpoint := flags.String("zabbix-endpoint", os.Getenv(zabbixEndpointEnv), "Zabbix JSON-RPC endpoint URL")
 	wazuhEndpoint := flags.String("wazuh-endpoint", os.Getenv(wazuhEndpointEnv), "Wazuh API base URL")
@@ -138,6 +138,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	fmt.Fprintln(stdout, answer)
 	return 0
+}
+
+func configuredModel() string {
+	if model := os.Getenv(mindrouterModelEnv); model != "" {
+		return model
+	}
+	return defaultModel
 }
 
 func buildSession(policyPath, model, endpoint, zabbixEndpoint, wazuhEndpoint, rtEndpoint string, wazuhInsecure, trace bool) (*orchestrator.Session, error) {

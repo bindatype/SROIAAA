@@ -20,13 +20,25 @@ func examplePolicy(t *testing.T) string {
 func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
-		mindrouterEndpointEnv, mindrouterKeyEnv,
+		mindrouterEndpointEnv, mindrouterKeyEnv, mindrouterModelEnv,
 		zabbixEndpointEnv, zabbixTokenEnv,
 		wazuhEndpointEnv, wazuhUsernameEnv, wazuhPasswordEnv, wazuhCriticalGroupsEnv,
 		pegasusDSNEnv, pegasusMaxRowsEnv, pegasusMaxBytesEnv, auditPathEnv,
 		rtEndpointEnv, rtTokenEnv, rtQueuesEnv, sroiaaaAgentConfigEnv,
 	} {
 		t.Setenv(name, "")
+	}
+}
+
+func TestConfiguredModel(t *testing.T) {
+	t.Setenv(mindrouterModelEnv, "")
+	if got := configuredModel(); got != defaultModel {
+		t.Fatalf("configuredModel() = %q without an override, want %q", got, defaultModel)
+	}
+
+	t.Setenv(mindrouterModelEnv, "default-agent")
+	if got := configuredModel(); got != "default-agent" {
+		t.Fatalf("configuredModel() = %q with an override, want default-agent", got)
 	}
 }
 

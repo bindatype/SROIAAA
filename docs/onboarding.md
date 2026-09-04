@@ -64,6 +64,9 @@ cat > ~/.config/sroiaaa/env <<'ENVEOF'
 # The model gateway. Needed by everything that asks a question.
 export MINDROUTER_API_KEY=...
 export SROIAAA_MINDROUTER_ENDPOINT=http://localhost:8000
+# Prefer a role alias so the gateway can change its backing model without a
+# client deployment. Use the served model name until the alias is provisioned.
+export SROIAAA_MODEL=default-agent
 
 # Zabbix: monitoring problems and the event log.
 export SROIAAA_ZABBIX_ENDPOINT=https://zabbix.example.edu/api_jsonrpc.php
@@ -224,10 +227,15 @@ environment before you believe it.
 
 ## Which model to use
 
-The default is **`gemma4:31b`**, set on 2026-08-28 and not to be changed
-without rerunning the comparison that chose it. It is compiled into
-`cmd/sroiaaa-chat` and overridable per call with `-model`, which is the right
-way to try another one.
+Model selection is, in descending precedence: the per-call `-model` flag,
+`SROIAAA_MODEL`, then the compiled fallback **`gemma4:31b`**. A deployment
+should set `SROIAAA_MODEL` to a MindRouter role alias such as `default-agent`;
+that lets the gateway change the backing model without rebuilding SROIAAA.
+Use `-model` to try a challenger without changing the deployment default.
+
+The compiled fallback was set on 2026-08-28 and should not be changed without
+rerunning the comparison that chose it. Changing an alias target should receive
+the same evaluation before it becomes the deployment default.
 
 ```bash
 make eval-headtohead                                    # the current default pair

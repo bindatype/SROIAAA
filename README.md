@@ -325,9 +325,11 @@ echo '{"intent":"monitoring.problems","host":"dss01"}' \
 Both halves take the policy. The planner uses it to authorize; the executor
 uses it to verify what it was given.
 
-The default model is `gemma4:31b`, chosen by `make eval-headtohead`. Override
-per call with `-model`; do not change the default without rerunning that
-suite.
+Model selection is `-model`, then `SROIAAA_MODEL`, then the compiled
+`gemma4:31b` fallback chosen by `make eval-headtohead`. Deployments should set
+`SROIAAA_MODEL` to a MindRouter alias such as `default-agent`; use `-model` for
+a one-off challenger. Do not change a deployment default without rerunning the
+evaluation suite.
 
 ### What it can and cannot answer
 
@@ -405,6 +407,7 @@ umask 077
 cat > ~/.config/sroiaaa/env <<'ENVEOF'
 export MINDROUTER_API_KEY=...
 export SROIAAA_MINDROUTER_ENDPOINT=http://localhost:8000
+export SROIAAA_MODEL=default-agent
 export SROIAAA_ZABBIX_ENDPOINT=https://zabbix.example.edu/api_jsonrpc.php
 export ZABBIX_RO_TOKEN=...
 export SROIAAA_WAZUH_ENDPOINT=https://wazuh.example.edu:55000
