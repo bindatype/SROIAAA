@@ -33,7 +33,7 @@ Only these eight evidence channels exist:
 - `monitoring.problems`: Zabbix triggers that are firing NOW. Host optional. Use for "what is wrong at the moment".
 - `monitoring.history`: The Zabbix event log, for what happened during a past window. Requires `since`, and usually `until`.
 - `live.evidence`: A policy-approved file from a SROIAAA endpoint. Requires host and resource.
-- `database.query`: One read-only SQL `SELECT` against the `pegasusdb` HPC accounting database.
+- `database.query`: One read-only SQL `SELECT` against the `pegasusdb` HPC accounting database. **The record of what jobs actually did**: jobs, submissions, queues, wait times, partitions, node failures under running jobs, storage use. Zabbix reports what a monitor noticed and Request Tracker what a person reported; neither knows a job failed.
 - `tickets.open`: Open Request Tracker tickets in the queues this deployment allowlists. No host parameter.
 - `tickets.for_host`: Open Request Tracker tickets whose subject mentions this host. Requires an exact host name.
 
