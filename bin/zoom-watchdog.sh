@@ -108,7 +108,9 @@ echo "zoom-watchdog: $alarm" >&2
 BIN=${SROIAAA_BIN:-"$ROOT/runtime"}
 if [ -n "${SROIAAA_ZOOM_WEBHOOK_URL:-}" ] &&
 	[ -n "${SROIAAA_ZOOM_WEBHOOK_SECRET:-}${SROIAAA_ZOOM_WEBHOOK_TOKEN:-}" ]; then
-	if mkdir -p "$BIN" 2>/dev/null && go build -o "$BIN/sroiaaa-notify" "$ROOT/cmd/sroiaaa-notify" 2>/dev/null; then
+	# cd into the module: go resolves go.mod from the working directory, not
+	# from the package path. See the same subshell in bin/zoom-digest.sh.
+	if mkdir -p "$BIN" 2>/dev/null && (cd "$ROOT" && go build -o "$BIN/sroiaaa-notify" ./cmd/sroiaaa-notify) 2>/dev/null; then
 		printf '%s\n' "$alarm" | "$BIN/sroiaaa-notify" -title "Morning digest is not running" ||
 			echo "zoom-watchdog: could not post the alarm to Zoom either" >&2
 	else

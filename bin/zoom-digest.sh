@@ -86,8 +86,14 @@ BIN=${SROIAAA_BIN:-"$ROOT/runtime"}
 RECEIPT=${SROIAAA_DIGEST_RECEIPT:-"$HOME/.local/state/sroiaaa/zoom-digest.receipt"}
 
 mkdir -p "$BIN"
-go build -o "$BIN/sroiaaa-chat" "$ROOT/cmd/sroiaaa-chat"
-[ "$DRY" -eq 1 ] || go build -o "$BIN/sroiaaa-notify" "$ROOT/cmd/sroiaaa-notify"
+# The build must run INSIDE the module. Naming the package by absolute path is
+# not enough: go resolves go.mod from the working directory. This script got
+# away with it for as long as its cron line began `cd $HOME/sroiaaa-src`, which
+# was doing the build's job by accident; the first run after that cd was
+# removed failed with "go.mod file not found in current directory". bin/ask
+# already carries this same subshell for the same reason.
+(cd "$ROOT" && go build -o "$BIN/sroiaaa-chat" ./cmd/sroiaaa-chat)
+[ "$DRY" -eq 1 ] || (cd "$ROOT" && go build -o "$BIN/sroiaaa-notify" ./cmd/sroiaaa-notify)
 
 # A failed question must not post a cheerful empty message, and must not stop
 # the questions after it. Each one stands or falls alone.
