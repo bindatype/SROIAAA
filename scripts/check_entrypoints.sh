@@ -42,8 +42,20 @@ parses() {
 	fi
 }
 
+# Run ask with a scrubbed environment.
+#
+# These checks assert that ask reports what is missing. A caller who has
+# sourced ~/.config/sroiaaa/env already has those variables exported, so ask
+# finds them and reports nothing, and the check fails -- not because the
+# behaviour is wrong but because the probe was measuring the caller's shell.
+# The result flipped on whether an operator had run `source` first: red for
+# anyone doing real work, green in CI, which is the least useful arrangement a
+# gate can have.
+#
+# env -i keeps only what the build needs, so the probe answers the same
+# question wherever it runs.
 says() {
-	SROIAAA_ENV=$1 "$PREFIX/ask" test 2>&1 | grep -q -- "$2"
+	env -i PATH="$PATH" HOME="$HOME" SROIAAA_ENV="$1" "$PREFIX/ask" test 2>&1 | grep -q -- "$2"
 }
 
 for script in "$ROOT"/bin/* "$ROOT"/scripts/*.sh; do
