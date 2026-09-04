@@ -281,9 +281,16 @@ func rtDateBound(value string, loc *time.Location) (string, error) {
 	// submitted today" answered 21 against a true 22, missing one filed at
 	// 03:49 in the morning.
 	//
-	// This assumes RT keeps the same zone as the host running SROIAAA. Both
-	// are at the same institution; if RT ever moves, this is where it breaks,
-	// and the symptom is a bound wrong by exactly the offset between them.
+	// RT and the host running SROIAAA are both America/New_York, and RT's half
+	// of that was measured rather than assumed. Ticket 111093, created
+	// 2026-01-10T06:30:07Z, matches Created > '2026-01-10 01:00:00' and not
+	// '2026-01-10 02:00:00', so RT read it as 01:30 local: offset -5 in
+	// January. In September the offset was -4. RT observes daylight saving and
+	// follows US Eastern.
+	//
+	// If RT ever moves zone, this is where it breaks, and the symptom is a
+	// bound wrong by exactly the offset between them -- which is invisible in
+	// any test that pins both sides to the same location.
 	return moment.In(loc).Format("2006-01-02 15:04:05"), nil
 }
 
