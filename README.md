@@ -326,10 +326,12 @@ Both halves take the policy. The planner uses it to authorize; the executor
 uses it to verify what it was given.
 
 Model selection is `-model`, then `SROIAAA_MODEL`, then the compiled
-`gemma4:31b` fallback chosen by `make eval-headtohead`. Deployments should set
-`SROIAAA_MODEL` to a MindRouter alias such as `default-agent`; use `-model` for
-a one-off challenger. Do not change a deployment default without rerunning the
-evaluation suite.
+`gemma4-31b-vllm` fallback. Deployments should set `SROIAAA_MODEL` to a
+MindRouter alias such as `default-agent`; use `-model` for a one-off
+challenger. Do not change a deployment default without rerunning the
+evaluation suite -- and note that as of 2026-09-04 the gateway serves exactly
+one model, so the comparison that is supposed to choose the default currently
+has nothing to compare. See "Which model to use" in `docs/onboarding.md`.
 
 ### What it can and cannot answer
 

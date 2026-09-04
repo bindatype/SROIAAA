@@ -142,11 +142,11 @@ This asks six real questions against live monitoring data and grades the
 answers. It takes about a minute. Success looks like:
 
 ```
-model: gemma4:31b   subject host: dss01
+model: gemma4-31b-vllm   subject host: dss01
   total_problems      6.2s  PASS
   host_scoped         1.4s  PASS
   ...
-===== gemma4:31b: 6/6 passed, avg 3.1s =====
+===== gemma4-31b-vllm: 6/6 passed, avg 5.4s =====
 
 report written to /home/you/SROIAAA/runtime/eval-zabbix.md
 ```
@@ -228,26 +228,42 @@ environment before you believe it.
 ## Which model to use
 
 Model selection is, in descending precedence: the per-call `-model` flag,
-`SROIAAA_MODEL`, then the compiled fallback **`gemma4:31b`**. A deployment
+`SROIAAA_MODEL`, then the compiled fallback **`gemma4-31b-vllm`**. A deployment
 should set `SROIAAA_MODEL` to a MindRouter role alias such as `default-agent`;
 that lets the gateway change the backing model without rebuilding SROIAAA.
 Use `-model` to try a challenger without changing the deployment default.
 
-The compiled fallback was set on 2026-08-28 and should not be changed without
-rerunning the comparison that chose it. Changing an alias target should receive
-the same evaluation before it becomes the deployment default.
+The evaluation harnesses resolve the same way, through
+`eval_common.default_model()`, so a harness cannot measure a different model
+from the one the deployment runs. It could before: seven scripts each held
+their own hard-coded default.
+
+**As of 2026-09-04 the gateway serves exactly one model.** Ask it rather than
+trusting this page:
 
 ```bash
-make eval-headtohead                                    # the current default pair
-python3 scripts/eval_headtohead.py gemma4:31b <other>   # against a challenger
+curl -s -H "Authorization: Bearer $MINDROUTER_API_KEY" \
+  "$SROIAAA_MINDROUTER_ENDPOINT/v1/models"
+```
+
+The compiled fallback should not be changed without rerunning the comparison
+that chooses it, and right now that comparison cannot be run -- there is no
+second model to run it against. `gemma4-31b-vllm` has been exercised end to
+end (RT shape 40/40, Zabbix 6/6 at 5.4s average) but it has not been graded
+against an alternative. Restore the grading the first time a second model is
+served.
+
+```bash
+python3 scripts/eval_headtohead.py <model> <other>   # needs two; no default pair
 ```
 
 That suite grades six question shapes with ground truth computed live: an
 aggregate, a grouped result that engages the row cap, a two-step schema
 lookup, a question with no data source that must be refused, a concept with no
 matching column that must be derived rather than refused, and a listing that
-exceeds the cap. On the day it was chosen, `gemma4:31b` scored 30/30 at 9.8s
-per question against `llama3.3:latest` at 28/30 and 15.2s.
+exceeds the cap. When it last ran as a comparison, on 2026-08-28, `gemma4:31b`
+scored 30/30 at 9.8s per question against `llama3.3:latest` at 28/30 and
+15.2s. Neither model is served any more.
 
 Earlier single-question comparisons could not separate those two, and one of
 them picked a different winner. If you are evaluating a model, use the suite

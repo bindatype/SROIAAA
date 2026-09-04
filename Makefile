@@ -21,7 +21,7 @@ help:
 	@echo '  make netbox-probe      reconnaissance against the NetBox API (no connector yet)'
 	@echo '  make eval-zabbix       grade the Zabbix path end to end'
 	@echo '  make eval-pegasus      grade model-authored SQL'
-	@echo '  make eval-headtohead   compare two models over six question shapes'
+	@echo '  make eval-headtohead MODELS="a b"  compare two models over six question shapes'
 	@echo '  make eval-prompt-ab    compare two prompts on the same binary'
 	@echo '  make eval-lead         measure the lead-with-the-failure rule alone'
 	@echo '  make eval-ablate       which prompt rules this model needs'
@@ -139,8 +139,10 @@ eval-zabbix:
 eval-pegasus:
 	python3 ./scripts/eval_pegasus.py
 
+# A comparison needs two models named; there is no default pair, because the
+# one that used to be here named models the gateway stopped serving.
 eval-headtohead:
-	python3 ./scripts/eval_headtohead.py
+	python3 ./scripts/eval_headtohead.py $(MODELS)
 
 eval-ablate:
 	python3 ./scripts/eval_ablate.py
