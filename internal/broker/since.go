@@ -28,7 +28,14 @@ func ParseSince(value string, now time.Time) (time.Time, error) {
 	// The words a question about a time period reaches for first. A model asked
 	// "did anything alert today" wrote since: "today", and rejecting that turns
 	// a well-formed question into a denial over vocabulary.
-	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	//
+	// Built in the caller's zone, then compared as an instant. This used to
+	// take the calendar date from a local clock and stamp it midnight UTC,
+	// which is not a day in either zone: at 20:07 EDT on 3 September it made
+	// "today" begin at 8pm on the 2nd, a 28-hour window. An operator asking
+	// what happened today got four hours of yesterday evening as well, and no
+	// part of the answer said so.
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "today":
 		return bound(midnight, now)
@@ -39,8 +46,8 @@ func ParseSince(value string, now time.Time) (time.Time, error) {
 	if moment, err := time.Parse(time.RFC3339, value); err == nil {
 		return bound(moment.UTC(), now)
 	}
-	if day, err := time.Parse("2006-01-02", value); err == nil {
-		return bound(day.UTC(), now)
+	if day, err := time.ParseInLocation("2006-01-02", value, now.Location()); err == nil {
+		return bound(day, now)
 	}
 	if days, err := parseDays(value); err == nil {
 		return bound(now.Add(-days).UTC(), now)
@@ -66,6 +73,14 @@ func parseDays(value string) (time.Duration, error) {
 	return days * 24, nil
 }
 
+// bound validates a resolved instant and returns it in UTC.
+//
+// The zone matters while a day boundary is being computed and must not survive
+// into the result. Plan writes these into a step with Format, and Verify
+// re-plans and compares with reflect.DeepEqual: the same instant carried as
+// "2026-07-05T00:00:00-04:00" by one path and "2026-07-05T04:00:00Z" by
+// another is equal as a time and unequal as a plan, and the plan is rejected
+// as unauthorized.
 func bound(moment, now time.Time) (time.Time, error) {
 	if moment.After(now.Add(time.Minute)) {
 		return time.Time{}, fmt.Errorf("since is in the future")
@@ -73,7 +88,7 @@ func bound(moment, now time.Time) (time.Time, error) {
 	if now.Sub(moment) > maxSinceAge {
 		return time.Time{}, fmt.Errorf("since reaches further back than %d days", int(maxSinceAge.Hours()/24))
 	}
-	return moment, nil
+	return moment.UTC(), nil
 }
 
 // ParseUntil closes the window ParseSince opens. It accepts the same forms and
@@ -83,14 +98,15 @@ func ParseUntil(value string, ref time.Time) (time.Time, error) {
 	if value == "" {
 		return time.Time{}, nil
 	}
-	if day, err := time.Parse("2006-01-02", value); err == nil {
+	if day, err := time.ParseInLocation("2006-01-02", value, ref.Location()); err == nil {
 		return day.AddDate(0, 0, 1).UTC(), nil
 	}
+	midnight := time.Date(ref.Year(), ref.Month(), ref.Day(), 0, 0, 0, 0, ref.Location())
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "today":
-		return time.Date(ref.Year(), ref.Month(), ref.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1), nil
+		return midnight.AddDate(0, 0, 1).UTC(), nil
 	case "yesterday":
-		return time.Date(ref.Year(), ref.Month(), ref.Day(), 0, 0, 0, 0, time.UTC), nil
+		return midnight.UTC(), nil
 	}
 	return ParseSince(value, ref)
 }
