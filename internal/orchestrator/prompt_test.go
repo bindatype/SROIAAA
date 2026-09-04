@@ -333,13 +333,16 @@ func TestSafetyRulesCannotBeAblated(t *testing.T) {
 //
 // maxEvidenceJSON caps one result. Nothing capped the total, and every result
 // stays in the message history, so five are sent together on the final turn.
-// The gateway does not refuse an oversized request -- it discards the head and
-// keeps the tail, and the head is the system prompt, so the safety rules are
-// the first thing lost, silently, exactly when the context is largest.
 //
-// Measured against gemma4:31b: the served context is 32,768 tokens, evidence
-// JSON runs 2.59 characters per token, and a full 64 KB result is therefore
-// about 25,270 tokens on its own.
+// Under the previous backend that overflow was silent: the gateway discarded
+// the head and kept the tail, and the head is the system prompt, so the safety
+// rules were the first thing lost exactly when the context was largest. The
+// current backend refuses with HTTP 400 instead, which is survivable but still
+// a failed answer, so the arithmetic is still worth asserting.
+//
+// The numbers move when the backend moves. They are held in one place, in
+// session.go, with the measurement that produced each; this test does the sums
+// so that a change there cannot quietly stop adding up.
 func TestContextBudgetIsNotAlreadyExceeded(t *testing.T) {
 	promptTokens := int(float64(len(systemPrompt)) / proseCharsPerToken)
 	schema, err := json.Marshal(ToolDefinition([]string{"monitoring.problems"}))
@@ -370,7 +373,9 @@ func TestContextBudgetIsNotAlreadyExceeded(t *testing.T) {
 }
 
 // TestRoomForMoreRefusesBeforeTheGatewayTruncates asserts the guard fires while
-// there is still a window to protect, rather than after the head is gone.
+// there is still a window to protect, rather than after the request is already
+// too big to serve -- and that it does not fire so early it refuses work that
+// fits.
 func TestRoomForMoreRefusesBeforeTheGatewayTruncates(t *testing.T) {
 	tools := []any{ToolDefinition([]string{"monitoring.problems"})}
 	messages := []Message{{Role: "system", Content: systemPrompt}, {Role: "user", Content: "how many?"}}
@@ -387,6 +392,12 @@ func TestRoomForMoreRefusesBeforeTheGatewayTruncates(t *testing.T) {
 			"the guard is too tight to be usable")
 	}
 
+	// A full run of real-size results must stay inside the window. Whether the
+	// guard closes before maxToolCalls is a property of the window, not of the
+	// guard: against the 32,768 this once assumed it closed on the second
+	// result, and asserting that it must close made the test fail when the
+	// backend got bigger. The invariant is that the history never passes what
+	// the gateway serves.
 	added := 0
 	for i := 0; i < maxToolCalls; i++ {
 		if _, ok := roomForMore(messages, tools, realResult); !ok {
@@ -395,15 +406,33 @@ func TestRoomForMoreRefusesBeforeTheGatewayTruncates(t *testing.T) {
 		messages = append(messages, Message{Role: "tool", Content: strings.Repeat("x", realResult)})
 		added++
 	}
-	if added >= maxToolCalls {
-		t.Errorf("all %d results were accepted; the total would be about %d tokens against a %d limit",
-			maxToolCalls, estimatedTokens(messages, tools), servedContextTokens)
-	}
 	if got := estimatedTokens(messages, tools); got > servedContextTokens {
 		t.Errorf("the guard let the history reach %d tokens, past the %d the gateway serves", got, servedContextTokens)
 	}
-	t.Logf("guard closed after %d real-size result(s); history estimated at %d of %d tokens",
-		added, estimatedTokens(messages, tools), servedContextTokens)
+	t.Logf("%d of %d real-size result(s) accepted; history estimated at %d of %d tokens",
+		added, maxToolCalls, estimatedTokens(messages, tools), servedContextTokens)
+
+	// The guard's actual job, exercised independently of how large the window
+	// happens to be: keep feeding it until it says no. It must say no, and it
+	// must say no while the request is still servable.
+	flood := []Message{{Role: "system", Content: systemPrompt}}
+	closed := false
+	for i := 0; i < 1000; i++ {
+		if _, ok := roomForMore(flood, tools, evidenceBudget()); !ok {
+			closed = true
+			break
+		}
+		flood = append(flood, Message{Role: "tool", Content: strings.Repeat("x", evidenceBudget())})
+	}
+	if !closed {
+		t.Fatal("the guard never refused, even after 1000 maximum-size results")
+	}
+	if got := estimatedTokens(flood, tools); got > servedContextTokens {
+		t.Errorf("the guard refused only after the history reached %d tokens, past the %d served",
+			got, servedContextTokens)
+	}
+	t.Logf("guard refused with %d maximum-size result(s) held, at %d of %d tokens",
+		len(flood)-1, estimatedTokens(flood, tools), servedContextTokens)
 
 	// The per-result cap is larger than the window can deliver, which is a
 	// finding rather than a failure: it means a maximum-size result can never

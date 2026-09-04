@@ -280,8 +280,11 @@ that warns rather than defaulting to trust. Never make skipping verification
 the default.
 
 **What is the natural bound?** Every intent needs a limit that keeps evidence
-inside the model's context. Note that MindRouter caps every model at 32768
-tokens regardless of native capacity.
+inside the model's context. Do not hard-code what that context is: MindRouter's
+ollama adapter clamped every model it polled to 32768 tokens regardless of
+native capacity, the vLLM-backed `gemma4-31b-vllm` is served at its full
+131072, and the orchestrator holds the current figure as `servedContextTokens`
+with the measurement behind it. `scripts/ctx_marker_probe.py` re-measures it.
 
 ## Why Request Tracker is worth adding
 

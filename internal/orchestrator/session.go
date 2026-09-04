@@ -66,33 +66,48 @@ const (
 	maxToolCalls = 5
 
 	// servedContextTokens is what the gateway actually serves, measured rather
-	// than read from configuration. /v1/models reports context_length 32768 for
-	// gemma4:31b while its model_max_context is 262144 and a console override
-	// claims 131072; the served path is what matters and it was measured by
-	// sending ~40,000 tokens, which came back reporting prompt_tokens=32768.
+	// than read from configuration -- the two disagreed for a month.
 	//
-	// Exceeding it is not an error. The gateway discards the HEAD and keeps the
-	// tail: with markers at both ends of an oversized request the model could
-	// see only the last one. The head is the system prompt, so every safety
-	// rule is the first thing thrown away, silently, exactly when the context
-	// is largest. That is why this is enforced here rather than trusted to the
-	// gateway.
+	// Measured against gemma4-31b-vllm by scripts/ctx_marker_probe.py, which
+	// plants a marker at the head, the middle, and the tail of an oversized
+	// prompt and asks which survived. All three were reported at every size up
+	// to 127,500 served tokens; 140,000 was refused outright with HTTP 400,
+	// "This model's maximum context length is 131072 tokens".
 	//
-	// Re-measure after any gateway or model change; see the vault note.
-	servedContextTokens = 32768
+	// That refusal is the important half. The previous backend, gemma4:31b on
+	// ollama behind MindRouter, served 32,768 and did not refuse: it discarded
+	// the HEAD and kept the tail, so an oversized request reported only the
+	// last marker. The head is the system prompt, so every safety rule was the
+	// first thing thrown away, silently, exactly when the context was largest.
+	// vLLM fails loudly instead. The guard stays because a refusal with a
+	// stated reason still beats a 400 in the user's face, and because nothing
+	// stops an ollama-backed model being registered here again.
+	//
+	// Re-measure after any gateway or model change. That instruction is not
+	// decoration: this constant was 32,768 and correct until the backend moved.
+	servedContextTokens = 131072
 
-	// Two ratios, because one is wrong for half the content. Both were measured
-	// against gemma4:31b and both are rounded down, so the estimate runs high:
-	// refusing early is recoverable, a silently discarded system prompt is not.
+	// Two ratios, because one is wrong for half the content. Both are measured
+	// against the served tokenizer and both are rounded DOWN past the densest
+	// sample seen, so the estimate runs high: refusing early is recoverable,
+	// overshooting the window is not.
 	//
-	// jsonCharsPerToken: 36,664 characters of live RT evidence tokenized to
-	// 14,137, which is 2.59. Structured JSON is dense in punctuation.
+	// Rounding down is the whole discipline, and it was got wrong once. These
+	// were 2.5 and 4.3, taken from a single sample each; re-measuring across
+	// three live intents found evidence denser than 2.5 and prose denser than
+	// 4.3, which made the guard optimistic in the one direction it must never
+	// be. Take the worst case, not the average.
 	//
-	// proseCharsPerToken: the 28,431-byte prompt measured 6,366 tokens, which
-	// is 4.47. Using the JSON figure for prose overstates the prompt by 79% and
-	// leaves no room for evidence that in fact fits.
-	jsonCharsPerToken  = 2.5
-	proseCharsPerToken = 4.3
+	// jsonCharsPerToken: live evidence measured 2.27 (fleet.inventory, 23,232
+	// chars), 2.59 (tickets.open, 36,664) and 2.73 (monitoring.problems,
+	// 9,273). The densest governs. Structured JSON is thick with punctuation,
+	// and the more uniform the records the worse it gets.
+	//
+	// proseCharsPerToken: the 29,420-byte prompt measured 7,261 tokens, which
+	// is 4.05. Using the JSON figure for prose would overstate it by 84% and
+	// leave no room for evidence that in fact fits.
+	jsonCharsPerToken  = 2.2
+	proseCharsPerToken = 4.0
 
 	// answerReserveTokens is room kept for the reply. Nothing sets max_tokens
 	// on the request, so the answer competes with the input for one window.
