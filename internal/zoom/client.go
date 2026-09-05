@@ -355,9 +355,9 @@ func (c *Client) Describe(text string) (string, error) {
 	endpoint.RawQuery = query.Encode()
 
 	var out strings.Builder
-	fmt.Fprintf(&out, "POST %s\n", endpoint.String())
+	fmt.Fprintf(&out, "POST %s\n", redactURL(endpoint))
 	fmt.Fprintf(&out, "Content-Type: application/json\n")
-	fmt.Fprintf(&out, "Authorization: %s\n", authorization)
+	fmt.Fprintf(&out, "Authorization: %s\n", redactSecret(authorization, c.secret == ""))
 	if c.secret != "" {
 		fmt.Fprintf(&out, "\nsigned as: %s\n", c.variant.Name)
 		signed := text
@@ -368,4 +368,96 @@ func (c *Client) Describe(text string) (string, error) {
 	}
 	fmt.Fprintf(&out, "\n%s\n", body)
 	return out.String(), nil
+}
+
+// redactURL renders a webhook endpoint for human eyes without handing over the
+// endpoint itself.
+//
+// This file already says a webhook URL must never reach "a command line, a
+// shell history, or a cron table", and then -dry-run printed it to a terminal,
+// where it goes into scrollback, a pasted bug report, or a screen share. The
+// URL is not merely a location: /inc connect mints it per channel, so it names
+// which channel a message lands in and is as sensitive as the credential it
+// travels with.
+//
+// What survives is what a person debugging actually needs: the scheme, the
+// host, the shape of the path, and which parameters are present. What goes is
+// every opaque identifier.
+//
+// Opacity, not length, decides. The first attempt redacted any segment past 12
+// characters and swallowed "incomingwebhook" along with the id after it, which
+// removes the one part of the path that says what the request is. A minted
+// identifier mixes case or digits; a route word does not.
+func redactURL(endpoint *url.URL) string {
+	shown := *endpoint
+
+	segments := strings.Split(shown.Path, "/")
+	for i, segment := range segments {
+		if looksMinted(segment) {
+			segments[i] = fmt.Sprintf("REDACTED-%d", len(segment))
+		}
+	}
+	shown.Path = strings.Join(segments, "/")
+
+	// format and timestamp are computed here and carry nothing private; every
+	// other parameter is assumed to. An allowlist rather than a blocklist, so
+	// a parameter added later is redacted by default rather than exposed by
+	// having been forgotten.
+	// The marker is URL-safe on purpose. "<redacted:44>" comes back out of
+	// URL.String() as "%3Credacted:44%3E", which is the sort of output a
+	// person skims past instead of reading.
+	query := shown.Query()
+	for key, values := range query {
+		if key == "format" || key == "timestamp" {
+			continue
+		}
+		for i := range values {
+			values[i] = fmt.Sprintf("REDACTED-%d", len(values[i]))
+		}
+		query[key] = values
+	}
+	shown.RawQuery = query.Encode()
+
+	if shown.User != nil {
+		shown.User = url.User("REDACTED")
+	}
+	return shown.String()
+}
+
+// redactSecret describes a credential without printing it.
+//
+// With a secret configured this is a per-message signature, which is spent as
+// soon as its timestamp ages out; with only a token it is the shared static
+// credential itself, and printing that is handing it over. Neither is shown.
+// The length and the kind are enough to tell "the wrong variant signed it"
+// from "the token is missing", which is what -dry-run is for.
+func redactSecret(value string, isStaticToken bool) string {
+	kind := "signature"
+	if isStaticToken {
+		kind = "static token"
+	}
+	if value == "" {
+		return fmt.Sprintf("<no %s>", kind)
+	}
+	return fmt.Sprintf("<redacted: %d-character %s>", len(value), kind)
+}
+
+// looksMinted reports whether a path segment is an identifier rather than a
+// word someone chose. Minted ids carry digits or mixed case; route words like
+// "chat", "webhooks" and "incomingwebhook" carry neither. Anything past 24
+// characters is treated as minted regardless, because no route word is that
+// long and a lowercase-only id would otherwise slip through.
+func looksMinted(segment string) bool {
+	if len(segment) <= 12 {
+		return false
+	}
+	if len(segment) > 24 {
+		return true
+	}
+	for _, r := range segment {
+		if (r >= '0' && r <= '9') || (r >= 'A' && r <= 'Z') {
+			return true
+		}
+	}
+	return false
 }

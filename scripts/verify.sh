@@ -111,6 +111,51 @@ else
 	bad "shell scripts do not parse" "$badsh"
 fi
 
+# Nothing but discipline has kept credentials and the Zoom endpoint out of the
+# repository. The endpoint is not merely a location: /inc connect mints it per
+# channel, so it names which channel messages land in and is as sensitive as
+# the token beside it.
+#
+# Two checks. The first is a pattern scan that works with no credentials at
+# all. The second only runs when the environment happens to be sourced, and is
+# the one that would actually catch a paste: it looks for the literal values
+# this host holds. Neither ever prints a matched value -- a check that echoes
+# the secret it found has published it to the terminal, the CI log, and
+# whatever scrolled past.
+#
+# Reserved names are excluded rather than special-cased. RFC 2606 sets aside
+# .invalid, .example and example.com so that documentation and tests can show
+# a realistic URL that can never resolve, and the zoom tests use exactly that.
+# A scanner that cannot tell a fixture from a leak gets switched off.
+badsecret=""
+for pattern in 'zoom\.us' 'hooks\.slack\.com' 'incomingwebhook/[A-Za-z0-9_-]\{16,\}'; do
+	hits=$(git ls-files -z 2>/dev/null |
+		xargs -0 grep -nE "$pattern" 2>/dev/null |
+		grep -vE '\.invalid|\.example|example\.(com|org|net)|localhost' |
+		grep -v '^scripts/verify.sh:' |
+		cut -d: -f1,2 || true)
+	[ -z "$hits" ] || badsecret="$badsecret
+  pattern /$pattern/ at:$(printf ' %s' $hits)"
+done
+
+for var in SROIAAA_ZOOM_WEBHOOK_URL SROIAAA_ZOOM_WEBHOOK_SECRET \
+	SROIAAA_ZOOM_WEBHOOK_TOKEN RT_API_TOKEN ZABBIX_RO_TOKEN \
+	WAZUH_API_PASSWORD MINDROUTER_API_KEY SROIAAA_PEGASUS_DSN; do
+	eval "value=\${$var:-}"
+	# Short values match everywhere and would only produce noise; a real
+	# credential is not eight characters.
+	[ ${#value} -ge 12 ] || continue
+	hits=$(git ls-files -z 2>/dev/null | xargs -0 grep -lF "$value" 2>/dev/null || true)
+	[ -z "$hits" ] || badsecret="$badsecret
+  the value of $var appears in:$(printf ' %s' $hits)"
+done
+
+if [ -z "$badsecret" ]; then
+	ok "no credential or webhook endpoint in tracked files"
+else
+	bad "a credential or webhook endpoint is in tracked files" "$badsecret"
+fi
+
 # The grader decides what every RT shape result means, and nothing in a run
 # notices when a grader is wrong: the numbers come out and look like results.
 if python3 ./scripts/eval_rt_shape.py --self-test >/dev/null 2>&1; then

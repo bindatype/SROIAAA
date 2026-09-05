@@ -305,3 +305,56 @@ func dial(t *testing.T, cfg Config) *Client {
 	client.now = func() time.Time { return time.UnixMilli(fixedMillis) }
 	return client
 }
+
+// TestDescribeRedactsTheEndpointAndCredential pins the one output path that
+// puts a webhook on a terminal.
+//
+// The existing Describe test asserts on "POST https://zoom.invalid/webhook",
+// which passes with or without redaction: every segment of that URL is short
+// enough to survive. A realistic minted endpoint is the case that matters, so
+// this uses one shaped like the real thing.
+func TestDescribeRedactsTheEndpointAndCredential(t *testing.T) {
+	const (
+		secretID = "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789abcdefgh"
+		tenant   = "ZmFrZS10ZW5hbnQtaWRlbnRpZmllcg"
+		token    = "static-shared-token-value-not-for-printing"
+	)
+	raw := "https://integrations.zoom.invalid/chat/webhooks/incomingwebhook/" +
+		secretID + "?tenant=" + tenant
+
+	for _, tc := range []struct {
+		name   string
+		config Config
+		leaked []string
+	}{
+		{"signed", Config{URL: raw, Secret: "shhh"}, []string{secretID, tenant}},
+		{"static token", Config{URL: raw, Token: token}, []string{secretID, tenant, token}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, err := New(tc.config)
+			if err != nil {
+				t.Fatalf("new: %v", err)
+			}
+			out, err := client.Describe("a message")
+			if err != nil {
+				t.Fatalf("describe: %v", err)
+			}
+			for _, secret := range tc.leaked {
+				if strings.Contains(out, secret) {
+					t.Errorf("Describe output contains a value that must never be printed (%d chars)", len(secret))
+				}
+			}
+			// Redaction that removes everything is not a fix, it is a
+			// different bug: -dry-run exists so somebody can see where the
+			// request is going and why it was signed the way it was.
+			for _, keep := range []string{"integrations.zoom.invalid", "incomingwebhook", "format=", "a message"} {
+				if !strings.Contains(out, keep) {
+					t.Errorf("Describe output lost %q; it is no longer useful for debugging", keep)
+				}
+			}
+			if !strings.Contains(strings.ToLower(out), "redacted") {
+				t.Error("Describe output shows no redaction marker; the reader cannot tell something was withheld")
+			}
+		})
+	}
+}
