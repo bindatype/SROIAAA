@@ -8,6 +8,7 @@
 #
 # From cron, source the environment first; cron gets almost none of it:
 #   45 4 * * * . $HOME/.config/sroiaaa/env && sh $HOME/dev/SROIAAA/bin/zoom-digest.sh
+#:usage-end
 #
 # Give cron the FULL path to this script rather than `cd`-ing to the repo and
 # using a relative one. That line used to read `cd $HOME/sroiaaa-src && sh
@@ -33,7 +34,7 @@ case ${1:-} in
 	shift
 	;;
 -h | --help)
-	sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,/^#:usage-end$/{/^#:usage-end$/d;p;}' "$0" | sed 's/^# \{0,1\}//'
 	exit 0
 	;;
 esac

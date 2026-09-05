@@ -5,8 +5,10 @@
 #   sh bin/zoom-watchdog.sh          # silent if the digest is current
 #   sh bin/zoom-watchdog.sh -v       # say what it found either way
 #
-# From cron, an hour or two after the digest:
-#   30 6 * * * . $HOME/.config/sroiaaa/env && sh $HOME/dev/SROIAAA/bin/zoom-watchdog.sh
+# From cron, at least 2h15m after the digest -- see MAX_AGE_HOURS below, the
+# gap is load-bearing and 06:30 is too early to catch a same-day failure:
+#   0 8 * * * . $HOME/.config/sroiaaa/env && sh $HOME/dev/SROIAAA/bin/zoom-watchdog.sh
+#:usage-end
 #
 # WHY THIS EXISTS
 #
@@ -41,7 +43,7 @@ case ${1:-} in
 	VERBOSE=1
 	;;
 -h | --help)
-	sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,/^#:usage-end$/{/^#:usage-end$/d;p;}' "$0" | sed 's/^# \{0,1\}//'
 	exit 0
 	;;
 esac
@@ -55,6 +57,19 @@ RECEIPT=${SROIAAA_DIGEST_RECEIPT:-"$HOME/.local/state/sroiaaa/zoom-digest.receip
 # 26 hours, not 24: a daily job must be allowed to be an hour late without
 # crying wolf, and an alarm that fires on ordinary jitter gets muted, which
 # leaves you worse off than no alarm.
+#
+# THIS NUMBER IS COUPLED TO WHEN THIS SCRIPT RUNS. The age measured is against
+# the last GOOD receipt, not against this morning -- a digest that failed at
+# 04:45 today leaves yesterday's 04:45 receipt standing, so the age at check
+# time is (check time - 04:45) + 24h. To catch a failure the same day, that
+# has to clear 26h, which means running no earlier than 06:45:
+#
+#   06:00 -> 25.25h   silent; the failure waits until tomorrow
+#   06:45 -> 26.00h   a coin flip on integer rounding
+#   08:00 -> 27.25h   alarms today, with margin      <-- the installed time
+#
+# So moving the cron entry earlier, or raising this threshold, silently costs a
+# day of detection. Move them together or not at all.
 MAX_AGE_HOURS=${SROIAAA_DIGEST_MAX_AGE_HOURS:-26}
 
 now=$(date +%s)
